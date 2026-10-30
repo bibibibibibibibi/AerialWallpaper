@@ -17,3 +17,6 @@ __pycache__/
 *.pyc
 build/
 dist/
+
+# 生成的首帧海报
+*.poster.jpg
