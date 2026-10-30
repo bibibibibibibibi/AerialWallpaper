@@ -209,7 +209,13 @@ WS_EX_NOACTIVATE = 0x08000000
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
 SWP_FRAMECHANGED = 0x0020
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
 SW_SHOW = 5
+SW_HIDE = 0
+SPI_SETDESKWALLPAPER = 20
+SPIF_UPDATEINIFILE = 0x01
+SPIF_SENDCHANGE = 0x02
 GWL_STYLE = -16
 GWL_EXSTYLE = -20
 WM_PAINT = 0x000F
@@ -295,7 +301,7 @@ def get_wallpaper_layer():
     return u.FindWindowExW(progman, None, "WorkerW", None) or progman
 
 
-def make_wallpaper_window():
+def make_wallpaper_window(show=True):
     layer = get_wallpaper_layer()
     if not layer:
         return None
@@ -314,11 +320,79 @@ def make_wallpaper_window():
     u.SetParent(hwnd, layer)
     style = u.GetWindowLongW(hwnd, GWL_STYLE)
     u.SetWindowLongW(hwnd, GWL_STYLE,
-                     (style & ~WS_POPUP) | WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS)
-    u.SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED)
-    u.ShowWindow(hwnd, SW_SHOW)
+                     (style & ~WS_POPUP) | WS_CHILD | WS_CLIPSIBLINGS)
+    if show:
+        u.SetWindowPos(hwnd, None, 0, 0, w, h,
+                       SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED)
+        u.ShowWindow(hwnd, SW_SHOW)
+    else:
+        u.SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOACTIVATE | SWP_FRAMECHANGED)
     ensure_notify_window()
     return hwnd
+
+
+def show_wallpaper_window(hwnd):
+    u.ShowWindow(hwnd, SW_SHOW)
+    u.SetWindowPos(hwnd, None, 0, 0, 0, 0,
+                   SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+
+
+def hide_wallpaper_window(hwnd):
+    u.ShowWindow(hwnd, SW_HIDE)
+
+
+def poster_path(video):
+    """首帧海报：与视频同目录的 <名字>.poster.jpg"""
+    return os.path.splitext(video)[0] + ".poster.jpg"
+
+
+def set_static_wallpaper(path):
+    """把系统静态壁纸换成指定图片，用作启动过渡时的兜底画面"""
+    try:
+        u.SystemParametersInfoW.restype = wintypes.BOOL
+        u.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT,
+                                            wintypes.LPCWSTR, wintypes.UINT]
+        return bool(u.SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, path,
+                                            SPIF_UPDATEINIFILE | SPIF_SENDCHANGE))
+    except Exception as e:
+        log(f"set_static_wallpaper failed: {e}")
+        return False
+
+
+def get_static_wallpaper():
+    """读取当前系统静态壁纸路径（用于记住用户原图，停止时恢复）"""
+    try:
+        u.SystemParametersInfoW.restype = wintypes.BOOL
+        u.SystemParametersInfoW.argtypes = [wintypes.UINT, wintypes.UINT,
+                                            wintypes.LPVOID, wintypes.UINT]
+        buf = ctypes.create_unicode_buffer(512)
+        if u.SystemParametersInfoW(0x0015, 512, buf, 0):   # SPI_GETDESKWALLPAPER
+            return buf.value
+    except Exception:
+        pass
+    return ""
+
+
+def wait_mpv_ready(hwnd, timeout=2.5, settle=0.25):
+    """等 mpv 在宿主窗口内建好渲染子窗口（说明首帧即将/已经呈现）"""
+    kids = []
+
+    def cb(child, lp):
+        kids.append(child)
+        return True
+
+    proc = u.EnumChildWindows
+    proc.argtypes = [H, ctypes.c_void_p, wintypes.LPARAM]
+    cb_ref = ctypes.WINFUNCTYPE(wintypes.BOOL, H, wintypes.LPARAM)(cb)
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        kids.clear()
+        proc(hwnd, ctypes.cast(cb_ref, ctypes.c_void_p), 0)
+        if kids:
+            time.sleep(settle)
+            return True
+        time.sleep(0.05)
+    return False
 
 
 NOTIFY_HWND = None
@@ -400,12 +474,44 @@ def main():
     if not os.path.exists(video):
         sys.exit("找不到视频: " + video)
 
-    hwnd = make_wallpaper_window()
+    # 过渡兜底：先把系统静态壁纸设成首帧海报，再等 mpv 渲染出画面才显示视频窗口。
+    # 这样启动/换片过程中用户看到的画面不变，不会"先露原壁纸再闪一下"。
+    # 只在第一次记住用户原图，供停止壁纸时恢复。
+    if not cfg.get("original_wallpaper"):
+        orig = get_static_wallpaper()
+        if orig and not orig.endswith(".poster.jpg"):
+            try:
+                cfg["original_wallpaper"] = orig
+                with open(CONFIG, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+                log("original wallpaper remembered: " + orig)
+            except Exception:
+                pass
+    poster = poster_path(video)
+    if os.path.exists(poster):
+        set_static_wallpaper(poster)
+
+    hwnd = make_wallpaper_window(show=False)
     if not hwnd:
         sys.exit("创建壁纸窗口失败（找不到 Progman？）")
 
     proc = hproc = pipe = None
     paused = None
+
+    def reveal():
+        """mpv 渲染就绪后再显示壁纸窗口，避免露黑场"""
+        if not wait_mpv_ready(hwnd):
+            log("mpv 就绪等待超时，直接显示")
+        show_wallpaper_window(hwnd)
+
+    def capture_poster():
+        """用 mpv 截当前帧做下次启动的海报（已存在则跳过）"""
+        nonlocal poster
+        poster = poster_path(video)
+        if os.path.exists(poster) or not pipe:
+            return
+        if ipc_send(pipe, {"command": ["screenshot-to-file", poster, "video"]}):
+            log("poster saved: " + poster)
 
     def launch():
         nonlocal proc, hproc
@@ -427,6 +533,11 @@ def main():
         nonlocal pipe, paused
         if delay:
             time.sleep(delay)
+        # 换片时同样先藏窗口 + 换成新片首帧海报，避免黑场闪一下
+        hide_wallpaper_window(hwnd)
+        p2 = poster_path(video)
+        if os.path.exists(p2):
+            set_static_wallpaper(p2)
         if hproc:
             try:
                 k32.CloseHandle(hproc)
@@ -448,6 +559,8 @@ def main():
 
     launch()
     pipe = ipc_connect()
+    reveal()
+    capture_poster()
     trigger_burst(BURST, "start")
     print(f"host={hwnd} mpv={proc.pid} video={video} burst={BURST:g}s", flush=True)
 
@@ -500,6 +613,8 @@ def main():
         if (hproc and r == WAIT_OBJECT_0) or proc.poll() is not None:
             restart(1.0)
             pipe = ipc_connect()
+            reveal()
+            capture_poster()
             trigger_burst(BURST, "mpv-restart")
             continue
 
@@ -538,6 +653,8 @@ def main():
                             video = newv
                             restart()
                             pipe = ipc_connect()
+                            reveal()
+                            capture_poster()
                             trigger_burst(BURST, "switch")
                             print(f"switched -> {video}", flush=True)
                 except Exception:
@@ -547,10 +664,12 @@ def main():
         if now >= next_win:
             next_win = now + 2
             if not u.IsWindow(hwnd):
-                hwnd = make_wallpaper_window()
+                hwnd = make_wallpaper_window(show=False)
                 if hwnd:
                     restart()
                     pipe = ipc_connect()
+                    reveal()
+                    capture_poster()
                     trigger_burst(BURST, "host-rebuilt")
 
 

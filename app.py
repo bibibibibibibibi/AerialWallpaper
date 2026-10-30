@@ -93,6 +93,10 @@ def stop_player():
        f"Get-CimInstance Win32_Process -Filter \"{filt}\" | "
        f"Where-Object {{ $_.CommandLine -like '{pattern}' }} | "
        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+    # 恢复用户原来的静态壁纸（首次启动播放器时记录的）
+    orig = load_cfg().get("original_wallpaper")
+    if orig and os.path.exists(orig):
+        ctypes.windll.user32.SystemParametersInfoW(20, 0, orig, 0x01 | 0x02)
 
 
 def task_installed():

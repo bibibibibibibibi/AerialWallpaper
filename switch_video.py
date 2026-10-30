@@ -60,13 +60,27 @@ def is_running():
         return False
 
 
+def restore_wallpaper():
+    """恢复用户原来的静态壁纸（首次启动播放器时记录的）"""
+    cfg = load()
+    orig = cfg.get("original_wallpaper")
+    if orig and os.path.exists(orig):
+        import ctypes
+        u = ctypes.windll.user32
+        ok = u.SystemParametersInfoW(20, 0, orig, 0x01 | 0x02)
+        print("已恢复原静态壁纸" if ok else "恢复静态壁纸失败：" + orig)
+    else:
+        print("（无记录的原壁纸，跳过恢复）")
+
+
 def stop():
     ps("Get-Process mpv -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill() }; "
        "Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe' Or Name='python.exe'\" | "
        "Where-Object { $_.CommandLine -like '*wallpaper_player.py*' } | "
        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
     ps(f"Stop-ScheduledTask -TaskName '{TASK}' -ErrorAction SilentlyContinue")
-    print("已停止：桌面回到系统静态壁纸。")
+    restore_wallpaper()
+    print("已停止。")
 
 
 def start():
