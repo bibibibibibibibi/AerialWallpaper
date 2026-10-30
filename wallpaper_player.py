@@ -34,6 +34,9 @@ else:
 CONFIG = os.path.join(HERE, "config.json")
 STATUS = os.path.join(HERE, "status.json")
 PIPE_NAME = "aerial_wallpaper_mpv"
+# 控制面板 → 播放器的命名事件（毫秒级指令通道，不依赖进程名/命令行匹配）
+EVT_STOP = "Global\\AerialWallpaper_ctl_stop"
+EVT_PLAY = "Global\\AerialWallpaper_ctl_play"
 
 DEFAULT_BURST = 8.0          # 亮屏后播放秒数
 DEFAULT_REFRESH_MIN = 0.0    # >0 则每 N 分钟轻微"动一下"，0=关闭
@@ -136,6 +139,13 @@ k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 k32.CloseHandle.argtypes = [wintypes.HANDLE]
 k32.SetPriorityClass.restype = wintypes.BOOL
 k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+k32.CreateEventW.restype = wintypes.HANDLE
+k32.CreateEventW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+k32.SetEvent.argtypes = [wintypes.HANDLE]
+k32.SetEvent.restype = wintypes.BOOL
+k32.OpenEventW.restype = wintypes.HANDLE
+k32.OpenEventW.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR]
+k32.ResetEvent.argtypes = [wintypes.HANDLE]
 
 
 class GUID(ctypes.Structure):
@@ -570,6 +580,13 @@ def main():
     proc = hproc = pipe = None
     paused = None
 
+    # 控制面板的指令事件（自动复位）
+    ctl_stop = k32.CreateEventW(None, False, False, EVT_STOP)
+    ctl_play = k32.CreateEventW(None, False, False, EVT_PLAY)
+    for h in (ctl_stop, ctl_play):
+        if h:
+            k32.ResetEvent(h)
+
     def reveal():
         """mpv 渲染就绪后再显示壁纸窗口，避免露黑场"""
         if not wait_mpv_ready(hwnd):
@@ -584,6 +601,35 @@ def main():
             return
         if ipc_send(pipe, {"command": ["screenshot-to-file", poster, "video"]}):
             log("poster saved: " + poster)
+
+    def shutdown(reason="panel"):
+        """优雅停止：收 mpv、销毁窗口、恢复用户原壁纸（面板「停止壁纸」走这里）"""
+        log("shutdown requested by " + reason)
+        try:
+            if pipe:
+                ipc_pause(pipe, True)
+                pipe.close()
+        except Exception:
+            pass
+        try:
+            if proc:
+                proc.terminate()
+                proc.wait(timeout=3)
+        except Exception:
+            pass
+        orig = load_config().get("original_wallpaper")
+        if orig and os.path.exists(orig):
+            set_static_wallpaper(orig)
+        try:
+            if u.IsWindow(hwnd):
+                u.DestroyWindow(hwnd)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(STATUS):
+                os.remove(STATUS)
+        except Exception:
+            pass
 
     def launch():
         nonlocal proc, hproc
@@ -710,15 +756,28 @@ def main():
     write_status("start")
 
     while True:
+        # 等待：mpv 进程退出 / 面板「停止」/ 面板「立即动一下」/ 消息
+        items = []
         if hproc:
-            arr = (wintypes.HANDLE * 1)(hproc)
-            r = u.MsgWaitForMultipleObjects(1, arr, False, 200, QS_ALLINPUT)
-        else:
-            r = u.MsgWaitForMultipleObjects(0, None, False, 200, QS_ALLINPUT)
+            items.append(("proc", hproc))
+        if ctl_stop:
+            items.append(("stop", ctl_stop))
+        if ctl_play:
+            items.append(("play", ctl_play))
+        arr = (wintypes.HANDLE * max(1, len(items)))(*[h for _, h in items]) if items else None
+        r = u.MsgWaitForMultipleObjects(len(items), arr, False, 200, QS_ALLINPUT)
+        fired = items[r][0] if (arr is not None and 0 <= r < len(items)) else None
 
         while u.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
             u.TranslateMessage(ctypes.byref(msg))
             u.DispatchMessageW(ctypes.byref(msg))
+
+        if fired == "stop":
+            shutdown("panel")
+            return
+        if fired == "play":
+            trigger_burst(BURST, "panel")
+            write_status("panel")
 
         now = time.time()
 
@@ -734,7 +793,7 @@ def main():
             trigger_burst(BURST, "user-return")
         prev_idle = idle
 
-        if (hproc and r == WAIT_OBJECT_0) or proc.poll() is not None:
+        if fired == "proc" or proc.poll() is not None:
             restart(1.0)
             pipe = ipc_connect()
             reveal()
@@ -771,6 +830,13 @@ def main():
                     if m != cfg_mtime:
                         cfg_mtime = m
                         cfgn = load_config()
+                        try:                       # 面板「保存」改的秒数立即生效
+                            nb = float(cfgn.get("burst_seconds", BURST))
+                            if nb > 0 and nb != BURST:
+                                BURST = nb
+                                log(f"burst -> {BURST:g}s")
+                        except Exception:
+                            pass
                         nd = cfgn.get("nudge") or 0
                         if nd and nd != last_nudge:
                             last_nudge = nd

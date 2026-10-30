@@ -73,11 +73,36 @@ def restore_wallpaper():
         print("（无记录的原壁纸，跳过恢复）")
 
 
+def signal_stop():
+    """给播放器发停止事件（毫秒级，不依赖进程名匹配）"""
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenEventW.restype = ctypes.c_void_p
+    k32.OpenEventW.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_wchar_p]
+    k32.SetEvent.argtypes = [ctypes.c_void_p]
+    h = k32.OpenEventW(0x0002, False, "Global\\AerialWallpaper_ctl_stop")
+    if not h:
+        return False
+    ok = bool(k32.SetEvent(ctypes.c_void_p(h)))
+    k32.CloseHandle(ctypes.c_void_p(h))
+    return ok
+
+
 def stop():
-    ps("Get-Process mpv -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill() }; "
-       "Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe' Or Name='python.exe'\" | "
-       "Where-Object { $_.CommandLine -like '*wallpaper_player.py*' } | "
-       "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+    stopped = False
+    if signal_stop():
+        for _ in range(25):                 # 最多等 2.5s 让它自己优雅退出
+            time.sleep(0.1)
+            if not is_running():
+                stopped = True
+                break
+    if not stopped:
+        # 兜底：老版本播放器没有事件，或卡住了，按命令行强杀（两种启动方式都覆盖）
+        ps("Get-Process mpv -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill() }; "
+           "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and "
+           "($_.CommandLine -like '*wallpaper_player.py*' -or "
+           " ($_.Name -eq 'AerialWallpaper.exe' -and $_.CommandLine -like '*--run*')) } | "
+           "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
     ps(f"Stop-ScheduledTask -TaskName '{TASK}' -ErrorAction SilentlyContinue")
     restore_wallpaper()
     print("已停止。")

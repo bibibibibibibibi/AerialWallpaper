@@ -11,6 +11,7 @@ import sys
 import json
 import time
 import ctypes
+import threading
 import subprocess
 from ctypes import wintypes
 
@@ -21,6 +22,8 @@ STATUS = os.path.join(APP_DIR, "status.json")
 TASK = "视频动态壁纸"
 VIDEO_EXT = (".mp4", ".mov", ".webm", ".mkv", ".m4v")
 MUTEX = "Global\\AerialWallpaperPlayer"
+EVT_STOP = "Global\\AerialWallpaper_ctl_stop"
+EVT_PLAY = "Global\\AerialWallpaper_ctl_play"
 
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
@@ -73,9 +76,32 @@ def is_running():
     return False
 
 
+def signal_player(event_name, wait=2.0):
+    """给播放器发指令（命名事件）。返回 True 表示播放器确实收到了"""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenEventW.restype = ctypes.c_void_p
+    k32.OpenEventW.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_wchar_p]
+    k32.SetEvent.argtypes = [ctypes.c_void_p]
+    h = k32.OpenEventW(0x0002, False, event_name)   # EVENT_MODIFY_STATE
+    if not h:
+        return False
+    ok = bool(k32.SetEvent(ctypes.c_void_p(h)))
+    k32.CloseHandle(ctypes.c_void_p(h))
+    return ok
+
+
+def wait_stopped(timeout=2.5):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if not is_running():
+            return True
+        time.sleep(0.1)
+    return not is_running()
+
+
 def start_player():
     if is_running():
-        return
+        return True
     if FROZEN:
         cmd = [sys.executable, "--run"]
     else:
@@ -84,19 +110,27 @@ def start_player():
         cmd = [exe, os.path.join(APP_DIR, "wallpaper_player.py")]
     subprocess.Popen(cmd, cwd=APP_DIR, close_fds=True,
                      creationflags=0x00000008 | 0x08000000)
+    return True
 
 
 def stop_player():
-    pattern = "*--run*" if FROZEN else "*wallpaper_player.py*"
-    filt = "Name='AerialWallpaper.exe'" if FROZEN else "Name='python.exe' Or Name='pythonw.exe'"
-    ps("Get-Process mpv -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill() }; "
-       f"Get-CimInstance Win32_Process -Filter \"{filt}\" | "
-       f"Where-Object {{ $_.CommandLine -like '{pattern}' }} | "
-       "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
-    # 恢复用户原来的静态壁纸（首次启动播放器时记录的）
+    """先走事件（毫秒级、跨启动方式都有效），超时才退回强杀"""
+    stopped = False
+    if signal_player(EVT_STOP):
+        stopped = wait_stopped(2.5)
+    if not stopped:
+        # 兜底：播放器没起来事件（旧版本）或卡住，按命令行强杀，两种启动方式都覆盖
+        ps("Get-Process mpv -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill() }; "
+           "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and "
+           "($_.CommandLine -like '*wallpaper_player.py*' -or "
+           " ($_.Name -eq 'AerialWallpaper.exe' -and $_.CommandLine -like '*--run*')) } | "
+           "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
+        wait_stopped(2.0)
+    # 恢复用户原来的静态壁纸（播放器正常停止时已自己还原，这里兜底）
     orig = load_cfg().get("original_wallpaper")
     if orig and os.path.exists(orig):
         ctypes.windll.user32.SystemParametersInfoW(20, 0, orig, 0x01 | 0x02)
+    return not is_running()
 
 
 def task_installed():
@@ -225,7 +259,7 @@ WM_CTLCOLORSTATIC = 0x0138
 WM_CTLCOLORBTN = 0x0135
 WM_CLOSE = 0x0010
 WM_DESTROY = 0x0002
-BM_GETCHECK = 0x00F2
+BM_GETCHECK = 0x00F0
 BM_SETCHECK = 0x00F1
 
 WS_CHILD = 0x40000000
@@ -268,6 +302,11 @@ def _setfont(h, f):
     u.SendMessageW(h, WM_SETFONT, f, 1)
 
 
+def flash(text, secs=4.0):
+    """在副标题行短暂显示一条操作反馈（refresh_ui 每秒刷新会覆盖它）"""
+    UI["flash"] = (text, time.time() + secs)
+
+
 def refresh_ui():
     """WM_TIMER：刷新状态显示"""
     running = is_running()
@@ -291,38 +330,68 @@ def refresh_ui():
         UI["color"] = AMBER
         txt, sub = "状态：未运行", "点「启动壁纸」开始"
     u.SetWindowTextW(UI["state"], txt)
+    fl = UI.get("flash")
+    if fl and time.time() < fl[1]:
+        sub = fl[0]
     u.SetWindowTextW(UI["sub"], sub)
     v = current_video()
     u.SetWindowTextW(UI["vid"], ("当前视频：" + os.path.basename(v)) if v
                      else "当前视频：未设置（把 mp4 放进本目录，或点「换视频…」）")
 
 
+def auto_toggle_async(enable):
+    """注册/移除登录自启（PowerShell 较慢，放后台线程，界面不卡）"""
+    UI["auto_busy"] = True
+    u.SetWindowTextW(UI["auto_state"], "自启：正在开启…" if enable else "自启：正在关闭…")
+
+    def work():
+        try:
+            if enable:
+                install_task()
+            else:
+                uninstall_task()
+        except Exception:
+            pass
+        on = task_installed()
+        u.SendMessageW(UI["auto"], BM_SETCHECK, 1 if on else 0, 0)
+        u.SetWindowTextW(UI["auto_state"], "自启：" + ("已开启" if on else "未开启"))
+        flash("开机自动运行已" + ("开启" if on else "关闭"))
+
+    threading.Thread(target=work, daemon=True).start()
+
+
 def ui_wndproc(hwnd, msg, wp, lp):
     if msg == WM_COMMAND:
         cid = wp & 0xFFFF
         if cid == ID_PLAY:
-            cfg = load_cfg(); cfg["nudge"] = time.time(); save_cfg(cfg)
+            if is_running():
+                signal_player(EVT_PLAY)
+                flash("已触发：播放中，几秒后自动定格")
+            else:
+                start_player()
+                flash("播放器未运行，已启动")
         elif cid == ID_SWITCH and _SWITCH_FN:
             _SWITCH_FN()
         elif cid == ID_STOP:
-            stop_player()
+            flash("正在停止…", 2.0)
+            ok = stop_player()
+            flash("已停止，桌面已恢复原壁纸" if ok else "停止未完成，请再点一次", 5.0)
         elif cid == ID_START:
+            flash("正在启动…", 2.0)
             start_player()
+            flash("已启动，画面就绪后接管桌面", 5.0)
         elif cid == ID_SAVE:
             try:
                 v = max(3, min(30, int(_get_edit_text(UI["burst"]) or 8)))
             except Exception:
                 v = 8
             cfg = load_cfg(); cfg["burst_seconds"] = v; save_cfg(cfg)
+            u.SetWindowTextW(UI["burst"], str(v))
+            flash(f"已保存：亮屏后播放 {v} 秒（立即生效）", 5.0)
         elif cid == ID_AUTO:
-            if u.SendMessageW(UI["auto"], BM_GETCHECK, 0, 0):
-                ok = install_task()
-                if not ok:
-                    u.SendMessageW(UI["auto"], BM_SETCHECK, 0, 0)
-                u.SetWindowTextW(UI["auto_state"], "自启：" + ("已开启" if ok else "注册失败"))
-            else:
-                uninstall_task()
-                u.SetWindowTextW(UI["auto_state"], "自启：未开启")
+            # 复选框点击后状态已切换，读当前状态即为用户意图
+            want = bool(u.SendMessageW(UI["auto"], BM_GETCHECK, 0, 0))
+            auto_toggle_async(want)
         u.InvalidateRect(UI["state"], None, True)
         refresh_ui()
         return 0
@@ -438,9 +507,9 @@ def run_ui():
                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
                        M, y, 200 * S, 22 * S, ID_AUTO)
     _setfont(UI["auto"], f_norm)
-    _auto_init = task_installed()
-    u.SendMessageW(UI["auto"], BM_SETCHECK, 1 if _auto_init else 0, 0)
-    UI["auto_state"] = _ctrl(hwnd, "STATIC", "自启：" + ("已开启" if _auto_init else "未开启"),
+    # 自启状态要问计划任务（PowerShell 约 1s），放到窗口显示后再查，
+    # 否则界面会"半成品且不响应点击"约 1 秒
+    UI["auto_state"] = _ctrl(hwnd, "STATIC", "自启：检查中…",
                              WS_CHILD | WS_VISIBLE, M + 210 * S, y + 3 * S, 200 * S, 18 * S)
     _setfont(UI["auto_state"], f_small)
     y += 32 * S
@@ -474,6 +543,15 @@ def run_ui():
     _SWITCH_FN = switch_video_dialog
     refresh_ui()
     u.SetTimer(hwnd, 1, 1000, None)
+
+    def init_auto_state():
+        on = task_installed()
+        if UI.get("auto_busy"):      # 用户已经手动改过了，别覆盖
+            return
+        u.SendMessageW(UI["auto"], BM_SETCHECK, 1 if on else 0, 0)
+        u.SetWindowTextW(UI["auto_state"], "自启：" + ("已开启" if on else "未开启"))
+
+    threading.Thread(target=init_auto_state, daemon=True).start()
 
     msg = wintypes.MSG()
     while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
