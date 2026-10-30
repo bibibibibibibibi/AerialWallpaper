@@ -1,0 +1,19 @@
+# 运行期生成
+aerial_catalog.json
+size_cache.json
+status.json
+player.log
+app_error.log
+ui_err.txt
+ui_out.txt
+*.part
+*.mov
+*.mp4
+*.mkv
+*.webm
+
+# Python / 打包
+__pycache__/
+*.pyc
+build/
+dist/
