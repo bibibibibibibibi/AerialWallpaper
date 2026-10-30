@@ -27,7 +27,7 @@
 ## 快速开始（源码）
 
 ```bat
-git clone https://github.com/<你的用户名>/AerialWallpaper.git
+git clone https://github.com/bibibibibibibibi/AerialWallpaper.git
 cd AerialWallpaper
 python fetch_aerial.py --list          # 浏览片库（44 条自然类 / 全部 89 条）
 python fetch_aerial.py --get 73 --apply   # 下载“帕劳水母湖”并立即设为壁纸
