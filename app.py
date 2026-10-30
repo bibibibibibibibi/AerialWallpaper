@@ -113,11 +113,33 @@ def start_player():
     return True
 
 
+def freeze_to_video():
+    """把桌面定格成当前视频的静止画面（停止壁纸时用）"""
+    v = current_video()
+    if not v:
+        return False
+    base = os.path.splitext(v)[0]
+    for c in (base + ".stopframe.jpg", base + ".poster.jpg"):
+        if os.path.exists(c):
+            u32 = ctypes.windll.user32
+            u32.SystemParametersInfoW(20, 0, c, 0x01 | 0x02)
+            return True
+    return False
+
+
+def restore_original():
+    orig = load_cfg().get("original_wallpaper")
+    if orig and os.path.exists(orig):
+        ctypes.windll.user32.SystemParametersInfoW(20, 0, orig, 0x01 | 0x02)
+        return True
+    return False
+
+
 def stop_player():
     """先走事件（毫秒级、跨启动方式都有效），超时才退回强杀"""
     stopped = False
     if signal_player(EVT_STOP):
-        stopped = wait_stopped(2.5)
+        stopped = wait_stopped(3.0)
     if not stopped:
         # 兜底：播放器没起来事件（旧版本）或卡住，按命令行强杀，两种启动方式都覆盖
         ps("Get-Process mpv -ErrorAction SilentlyContinue | ForEach-Object { $_.Kill() }; "
@@ -126,10 +148,9 @@ def stop_player():
            " ($_.Name -eq 'AerialWallpaper.exe' -and $_.CommandLine -like '*--run*')) } | "
            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
         wait_stopped(2.0)
-    # 恢复用户原来的静态壁纸（播放器正常停止时已自己还原，这里兜底）
-    orig = load_cfg().get("original_wallpaper")
-    if orig and os.path.exists(orig):
-        ctypes.windll.user32.SystemParametersInfoW(20, 0, orig, 0x01 | 0x02)
+        # 强杀时播放器来不及自己定格，这里补一张
+        if not freeze_to_video():
+            restore_original()
     return not is_running()
 
 
@@ -375,7 +396,7 @@ def ui_wndproc(hwnd, msg, wp, lp):
         elif cid == ID_STOP:
             flash("正在停止…", 2.0)
             ok = stop_player()
-            flash("已停止，桌面已恢复原壁纸" if ok else "停止未完成，请再点一次", 5.0)
+            flash("已停止，桌面定格为当前视频画面" if ok else "停止未完成，请再点一次", 5.0)
         elif cid == ID_START:
             flash("正在启动…", 2.0)
             start_player()

@@ -602,12 +602,23 @@ def main():
         if ipc_send(pipe, {"command": ["screenshot-to-file", poster, "video"]}):
             log("poster saved: " + poster)
 
-    def shutdown(reason="panel"):
-        """优雅停止：收 mpv、销毁窗口、恢复用户原壁纸（面板「停止壁纸」走这里）"""
+    def shutdown(reason="panel", keep_frame=True):
+        """优雅停止：收 mpv、销毁窗口。
+
+        keep_frame=True（默认）：桌面定格成当前视频的静止画面（视觉连续、不会跳成别的图）；
+        keep_frame=False：恢复用户原来的静态壁纸。
+        """
         log("shutdown requested by " + reason)
+        # 先冻结再截一帧，保证截到的是"定格那一帧"而不是运动中带拖影的画面
+        if pipe:
+            ipc_pause(pipe, True)
+            time.sleep(0.25)
+        still = os.path.splitext(video)[0] + ".stopframe.jpg"
+        if keep_frame and pipe:
+            if ipc_send(pipe, {"command": ["screenshot-to-file", still, "video"]}):
+                time.sleep(0.6)
         try:
             if pipe:
-                ipc_pause(pipe, True)
                 pipe.close()
         except Exception:
             pass
@@ -617,9 +628,23 @@ def main():
                 proc.wait(timeout=3)
         except Exception:
             pass
-        orig = load_config().get("original_wallpaper")
-        if orig and os.path.exists(orig):
-            set_static_wallpaper(orig)
+
+        if keep_frame:
+            # 定格成当前视频的静止画面：优先用刚截的帧，退而用首帧海报
+            for cand in (still, poster_path(video)):
+                if os.path.exists(cand):
+                    set_static_wallpaper(cand)
+                    log("froze to frame: " + cand)
+                    break
+            else:
+                orig = load_config().get("original_wallpaper")
+                if orig and os.path.exists(orig):
+                    set_static_wallpaper(orig)
+        else:
+            orig = load_config().get("original_wallpaper")
+            if orig and os.path.exists(orig):
+                set_static_wallpaper(orig)
+                log("restored original wallpaper")
         try:
             if u.IsWindow(hwnd):
                 u.DestroyWindow(hwnd)

@@ -5,8 +5,9 @@
 用法:
   python switch_video.py                      # 显示当前配置 + 可选视频列表
   python switch_video.py D:/x/beijing.mp4     # 换片
-  python switch_video.py --stop               # 停止视频壁纸（回到系统静态壁纸）
+  python switch_video.py --stop               # 停止视频壁纸（桌面定格为当前视频画面）
   python switch_video.py --start              # 启动视频壁纸
+  python switch_video.py --restore            # 恢复成你原来的静态壁纸
 """
 import os
 import sys
@@ -73,6 +74,22 @@ def restore_wallpaper():
         print("（无记录的原壁纸，跳过恢复）")
 
 
+def freeze_to_video():
+    """把桌面定格成当前视频的静止画面（停止壁纸后的默认表现）"""
+    import ctypes
+    cfg = load()
+    v = cfg.get("video")
+    if not v or not os.path.exists(v):
+        return False
+    base = os.path.splitext(v)[0]
+    for cand in (base + ".stopframe.jpg", base + ".poster.jpg"):
+        if os.path.exists(cand):
+            ctypes.windll.user32.SystemParametersInfoW(20, 0, cand, 0x01 | 0x02)
+            print("桌面已定格为当前视频画面：" + os.path.basename(cand))
+            return True
+    return False
+
+
 def signal_stop():
     """给播放器发停止事件（毫秒级，不依赖进程名匹配）"""
     import ctypes
@@ -104,7 +121,8 @@ def stop():
            " ($_.Name -eq 'AerialWallpaper.exe' -and $_.CommandLine -like '*--run*')) } | "
            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }")
     ps(f"Stop-ScheduledTask -TaskName '{TASK}' -ErrorAction SilentlyContinue")
-    restore_wallpaper()
+    if not freeze_to_video():
+        restore_wallpaper()
     print("已停止。")
 
 
@@ -125,6 +143,8 @@ def main():
 
     if "--stop" in args:
         return stop()
+    if "--restore" in args:
+        return restore_wallpaper()
     if "--start" in args:
         return start()
     if "--nudge" in args:

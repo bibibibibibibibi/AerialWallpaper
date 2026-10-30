@@ -20,3 +20,6 @@ dist/
 
 # 生成的首帧海报
 *.poster.jpg
+
+# 停止时截取的定格帧
+*.stopframe.jpg
