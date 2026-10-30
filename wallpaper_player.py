@@ -290,15 +290,68 @@ def screen_size():
     return w, h
 
 
+LAYER_HWND = None
+
+
+def _find_workerw(progman):
+    """在 Progman 下找一个"纯"WorkerW（不含 SHELLDLL_DefView 图标层的那个）"""
+    found = []
+    CB = ctypes.WINFUNCTYPE(wintypes.BOOL, H, wintypes.LPARAM)
+
+    def on_child(h, lp):
+        cls = ctypes.create_unicode_buffer(64)
+        u.GetClassNameW(h, cls, 64)
+        if cls.value == "WorkerW":
+            found.append(h)
+        return True
+
+    ref = CB(on_child)
+    u.EnumChildWindows(progman, ctypes.cast(ref, ctypes.c_void_p), 0)
+
+    for h in found:
+        kids = []
+
+        def on_kid(ch, lp, _out=kids):
+            _out.append(ch)
+            return True
+
+        ref2 = CB(on_kid)
+        u.EnumChildWindows(h, ctypes.cast(ref2, ctypes.c_void_p), 0)
+        has_defview = False
+        for k in kids:
+            c = ctypes.create_unicode_buffer(64)
+            u.GetClassNameW(k, c, 64)
+            if c.value == "SHELLDLL_DefView":
+                has_defview = True
+                break
+        if not has_defview:
+            return h
+    return found[0] if found else None
+
+
 def get_wallpaper_layer():
+    """取桌面层（WorkerW）。
+
+    关键：0x052C 每调用一次就会让 Progman **新建**一个 WorkerW 并让旧的那个失效，
+    挂在旧层下的窗口会被连带销毁（表现为壁纸窗口消失、mpv 变成独立播放窗口）。
+    所以这里优先复用已存在的 WorkerW，只有确实找不到时才触发一次 0x052C。
+    """
+    global LAYER_HWND
     progman = u.FindWindowW("Progman", None)
     if not progman:
         return None
+    if LAYER_HWND and u.IsWindow(LAYER_HWND):
+        return LAYER_HWND
+    w = _find_workerw(progman)
+    if w:
+        LAYER_HWND = w
+        return w
     res = ctypes.c_size_t()
     for wp, lp in ((0xD, 0x1), (0xD, 0x0), (0, 0)):
         u.SendMessageTimeoutW(progman, 0x052C, wp, lp, 0, 1000, ctypes.byref(res))
-    time.sleep(0.4)
-    return u.FindWindowExW(progman, None, "WorkerW", None) or progman
+    time.sleep(0.35)
+    LAYER_HWND = _find_workerw(progman) or progman
+    return LAYER_HWND
 
 
 def make_wallpaper_window(show=True):
@@ -455,11 +508,30 @@ def acquire_single_instance():
     return h
 
 
+def kill_stray_mpv():
+    """启动时清理上次异常退出遗留的 mpv（父窗口已没、会变成屏幕上的独立播放窗口）"""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name='mpv.exe'\" | "
+             "Where-Object { $_.CommandLine -like '*aerial_wallpaper_mpv*' } | "
+             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }"],
+            capture_output=True, text=True, timeout=8)
+        killed = [x for x in (r.stdout or "").split() if x.strip().isdigit()]
+        if killed:
+            log("killed stray mpv: " + ",".join(killed))
+        return killed
+    except Exception as e:
+        log(f"kill_stray_mpv failed: {e}")
+        return []
+
+
 def main():
     global BURST
     if not acquire_single_instance():
         print("已有实例在运行，退出。", file=sys.stderr)
         return
+    kill_stray_mpv()
 
     cfg = load_config()
     BURST = float(arg("--burst", cfg.get("burst_seconds", DEFAULT_BURST)))
@@ -519,7 +591,7 @@ def main():
             [mpv, f"--wid={hwnd}", "--loop=inf", "--no-audio", "--really-quiet",
              "--no-osd-bar", "--osd-level=0", "--hwdec=auto-safe",
              "--video-unscaled=no", "--keepaspect=yes", "--panscan=0.0",
-             "--no-input-default-bindings", "--force-window=yes",
+             "--no-input-default-bindings", "--no-osc", "--border=no",
              f"--input-ipc-server={PIPE_NAME}",
              "--keep-open=yes", video],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -557,6 +629,57 @@ def main():
         paused = None
         launch()
 
+    def load_in_place(newv):
+        """就地换片：让现有 mpv 直接 loadfile，进程和渲染窗口都不重建。
+
+        这是"换片时冒出播放窗口"的根治办法——不新建进程就不会有新的顶层窗口。
+        """
+        nonlocal pipe
+        if pipe is None:
+            pipe = ipc_connect(timeout=3)
+        if not pipe:
+            return False
+        if not ipc_send(pipe, {"command": ["loadfile", newv, "replace"]}):
+            return False
+        ipc_send(pipe, {"command": ["set_property", "loop-file", "inf"]})
+        if paused:
+            ipc_pause(pipe, True)
+        return True
+
+    def rebuild_host():
+        """宿主窗口失效（桌面层被重建）时整体重建：先收掉旧 mpv，再建窗口、起新 mpv"""
+        nonlocal hwnd, proc, hproc, pipe, paused
+        if hproc:
+            try:
+                k32.CloseHandle(hproc)
+            except Exception:
+                pass
+            hproc = None
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                pass
+            proc = None
+        try:
+            if pipe:
+                pipe.close()
+        except Exception:
+            pass
+        pipe = None
+        paused = None
+        newh = make_wallpaper_window(show=False)
+        if not newh:
+            return False
+        hwnd = newh
+        launch()
+        pipe = ipc_connect()
+        reveal()
+        capture_poster()
+        trigger_burst(BURST, "host-rebuilt")
+        return True
+
     launch()
     pipe = ipc_connect()
     reveal()
@@ -571,6 +694,7 @@ def main():
     next_cfg = next_win = time.time() + 1
     next_refresh = time.time() + refresh_min * 60 if refresh_min > 0 else float("inf")
     seen_log = 0
+    pending_poster = False
 
     def write_status(reason=""):
         try:
@@ -633,6 +757,10 @@ def main():
                 write_status("state")
                 log("paused" if want_paused else "playing")
                 print(("paused" if want_paused else "playing"), flush=True)
+                # 换片后等画面稳定再补截海报（在冻结时做，不阻塞消息泵）
+                if paused and pending_poster:
+                    pending_poster = False
+                    capture_poster()
 
         # 配置热更新（每秒）：换片 / 手动 nudget 触发一次播放
         if not cli_override and now >= next_cfg:
@@ -651,26 +779,27 @@ def main():
                         newv = find_video(cfgn)
                         if newv != video and os.path.exists(newv):
                             video = newv
-                            restart()
-                            pipe = ipc_connect()
-                            reveal()
-                            capture_poster()
+                            if load_in_place(video):
+                                log(f"switched in place -> {os.path.basename(video)}")
+                                print(f"switched (in place) -> {video}", flush=True)
+                                if not os.path.exists(poster_path(video)):
+                                    pending_poster = True
+                            else:
+                                restart()
+                                pipe = ipc_connect()
+                                reveal()
+                                capture_poster()
+                                print(f"switched (restart) -> {video}", flush=True)
                             trigger_burst(BURST, "switch")
-                            print(f"switched -> {video}", flush=True)
                 except Exception:
                     pass
 
-        # 壁纸层重建（Explorer 重启）
+        # 壁纸层重建（Explorer 重启 / 桌面层被系统换掉）
         if now >= next_win:
             next_win = now + 2
             if not u.IsWindow(hwnd):
-                hwnd = make_wallpaper_window(show=False)
-                if hwnd:
-                    restart()
-                    pipe = ipc_connect()
-                    reveal()
-                    capture_poster()
-                    trigger_burst(BURST, "host-rebuilt")
+                log("host window gone, rebuilding")
+                rebuild_host()
 
 
 if __name__ == "__main__":
