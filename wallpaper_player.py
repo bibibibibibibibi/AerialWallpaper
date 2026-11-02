@@ -129,6 +129,10 @@ u.SendMessageTimeoutW.argtypes = [H, wintypes.UINT, ctypes.c_size_t, ctypes.c_si
                                   wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
 u.IsWindow.argtypes = [H]
 u.IsWindow.restype = wintypes.BOOL
+u.IsWindowVisible.argtypes = [H]
+u.IsWindowVisible.restype = wintypes.BOOL
+u.GetWindowThreadProcessId.argtypes = [H, ctypes.POINTER(wintypes.DWORD)]
+u.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
 u.MsgWaitForMultipleObjects.restype = wintypes.DWORD
 u.MsgWaitForMultipleObjects.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
                                         wintypes.BOOL, wintypes.DWORD, wintypes.DWORD]
@@ -217,6 +221,7 @@ WS_EX_TRANSPARENT = 0x00000020
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_NOACTIVATE = 0x08000000
 SWP_NOACTIVATE = 0x0010
+SWP_NOZORDER = 0x0004
 SWP_SHOWWINDOW = 0x0040
 SWP_FRAMECHANGED = 0x0020
 SWP_NOSIZE = 0x0001
@@ -536,6 +541,34 @@ def kill_stray_mpv():
         return []
 
 
+def hide_stray_mpv(pid):
+    """兜底防线：宿主窗口一旦失效，mpv 会拿着无效的 --wid 自建一个顶层窗口，
+    表现就是屏幕上冒出"独立播放窗口"。这里把属于该 mpv 进程的顶层可见窗口
+    全部隐藏并挪出屏幕（mpv 的渲染窗口是宿主的子窗口，EnumWindows 枚举不到，
+    所以不会误伤正常画面）。"""
+    if not pid:
+        return 0
+    hits = []
+    CBT = ctypes.WINFUNCTYPE(wintypes.BOOL, H, wintypes.LPARAM)
+
+    def cb(h, lp):
+        p = wintypes.DWORD(0)
+        u.GetWindowThreadProcessId(h, ctypes.byref(p))
+        if p.value == pid and u.IsWindowVisible(h):
+            hits.append(h)
+        return True
+
+    ref = CBT(cb)
+    u.EnumWindows(ctypes.cast(ref, ctypes.c_void_p), 0)
+    for h in hits:
+        u.ShowWindow(h, SW_HIDE)
+        u.SetWindowPos(h, None, -32000, -32000, 0, 0,
+                       SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER)
+    if hits:
+        log(f"hid {len(hits)} stray mpv window(s)")
+    return len(hits)
+
+
 def main():
     global BURST
     if not acquire_single_instance():
@@ -579,6 +612,7 @@ def main():
 
     proc = hproc = pipe = None
     paused = None
+    stray_until = 0.0
 
     # 控制面板的指令事件（自动复位）
     ctl_stop = k32.CreateEventW(None, False, False, EVT_STOP)
@@ -587,9 +621,9 @@ def main():
         if h:
             k32.ResetEvent(h)
 
-    def reveal():
+    def reveal(timeout=2.5):
         """mpv 渲染就绪后再显示壁纸窗口，避免露黑场"""
-        if not wait_mpv_ready(hwnd):
+        if not wait_mpv_ready(hwnd, timeout=timeout):
             log("mpv 就绪等待超时，直接显示")
         show_wallpaper_window(hwnd)
 
@@ -657,7 +691,11 @@ def main():
             pass
 
     def launch():
-        nonlocal proc, hproc
+        nonlocal proc, hproc, stray_until
+        # 宿主窗口必须有效，否则 mpv 会自建顶层窗口（独立播放窗）
+        if not u.IsWindow(hwnd):
+            log("launch aborted: host window invalid")
+            return False
         proc = subprocess.Popen(
             [mpv, f"--wid={hwnd}", "--loop=inf", "--no-audio", "--really-quiet",
              "--no-osd-bar", "--osd-level=0", "--hwdec=auto-safe",
@@ -671,11 +709,18 @@ def main():
         if hs:
             k32.SetPriorityClass(hs, BELOW_NORMAL_PRIORITY_CLASS)
             k32.CloseHandle(hs)
+        # 启动后几秒内持续巡检，防止 mpv 真的冒出顶层窗口
+        stray_until = time.time() + 6.0
+        return True
 
     def restart(delay=0.0):
         nonlocal pipe, paused
         if delay:
             time.sleep(delay)
+        # 宿主窗口没了就绝不能用它去起 mpv（会变成独立播放窗），交给 rebuild
+        if not u.IsWindow(hwnd):
+            log("restart skipped: host window gone")
+            return False
         # 换片时同样先藏窗口 + 换成新片首帧海报，避免黑场闪一下
         hide_wallpaper_window(hwnd)
         p2 = poster_path(video)
@@ -688,7 +733,7 @@ def main():
                 pass
         try:
             proc.terminate()
-            proc.wait(timeout=3)
+            proc.wait(timeout=1)
         except Exception:
             pass
         try:
@@ -698,7 +743,7 @@ def main():
             pass
         pipe = None
         paused = None
-        launch()
+        return launch()
 
     def load_in_place(newv):
         """就地换片：让现有 mpv 直接 loadfile，进程和渲染窗口都不重建。
@@ -718,7 +763,11 @@ def main():
         return True
 
     def rebuild_host():
-        """宿主窗口失效（桌面层被重建）时整体重建：先收掉旧 mpv，再建窗口、起新 mpv"""
+        """宿主窗口失效（桌面层被重建）时整体重建：先收掉旧 mpv，再建窗口、起新 mpv。
+
+        锁屏解锁后 Windows 会换掉桌面 WorkerW，宿主窗口被连带销毁；此时 mpv 若还活着
+        就会变成屏幕上的独立播放窗，所以第一条命令永远是先把 mpv 收掉。
+        """
         nonlocal hwnd, proc, hproc, pipe, paused
         if hproc:
             try:
@@ -727,9 +776,11 @@ def main():
                 pass
             hproc = None
         if proc:
+            # 先隐藏可能已经冒出来的顶层窗口，再杀进程，避免"独立窗口"多闪一下
+            hide_stray_mpv(proc.pid)
             try:
                 proc.terminate()
-                proc.wait(timeout=3)
+                proc.wait(timeout=1)
             except Exception:
                 pass
             proc = None
@@ -740,13 +791,23 @@ def main():
             pass
         pipe = None
         paused = None
+        # 收掉画面后桌面露出的是系统静态壁纸，先保证它是"当前视频的定格帧"。
+        # 已经是同一张就不再重复设置——SystemParametersInfo 要写注册表并广播，
+        # 每次能省下 0.5~1 秒，解锁后的空窗期越短越好。
+        cur = os.path.normcase(get_static_wallpaper() or "")
+        for cand in (os.path.splitext(video)[0] + ".stopframe.jpg", poster_path(video)):
+            if os.path.exists(cand):
+                if os.path.normcase(cand) != cur:
+                    set_static_wallpaper(cand)
+                break
         newh = make_wallpaper_window(show=False)
         if not newh:
             return False
         hwnd = newh
-        launch()
-        pipe = ipc_connect()
-        reveal()
+        if not launch():
+            return False
+        pipe = ipc_connect(timeout=3)
+        reveal(timeout=2.0)
         capture_poster()
         trigger_burst(BURST, "host-rebuilt")
         return True
@@ -762,7 +823,8 @@ def main():
     cfg_mtime = os.path.getmtime(CONFIG) if os.path.exists(CONFIG) else 0
     last_nudge = (load_config().get("nudge") or 0)
     msg = wintypes.MSG()
-    next_cfg = next_win = time.time() + 1
+    next_cfg = time.time() + 1
+    next_stray = 0.0
     next_refresh = time.time() + refresh_min * 60 if refresh_min > 0 else float("inf")
     seen_log = 0
     pending_poster = False
@@ -806,6 +868,21 @@ def main():
 
         now = time.time()
 
+        # ① 宿主窗口存活检查必须放在最前面。
+        #    锁屏解锁 / Explorer 重启会换掉桌面 WorkerW，宿主窗口被连带销毁。
+        #    如果先走下面"mpv 退出 -> 重启"的分支，新 mpv 会拿着失效的 --wid
+        #    自建一个顶层窗口（屏幕上冒出的独立播放窗），几秒后才被补救。
+        if not u.IsWindow(hwnd):
+            log("host window gone, rebuilding")
+            if not rebuild_host():
+                time.sleep(0.8)          # 桌面层还没就绪，退避后再试
+            continue
+
+        # ② mpv 启动后 6 秒内巡检，万一真冒出顶层窗口立即藏掉
+        if proc and now < stray_until and now >= next_stray:
+            next_stray = now + 0.5
+            hide_stray_mpv(proc.pid)
+
         # 事件日志（wndproc 写的）
         while seen_log < len(STATE["log"]):
             log("event: " + STATE["log"][seen_log])
@@ -818,12 +895,12 @@ def main():
             trigger_burst(BURST, "user-return")
         prev_idle = idle
 
-        if fired == "proc" or proc.poll() is not None:
-            restart(1.0)
-            pipe = ipc_connect()
-            reveal()
-            capture_poster()
-            trigger_burst(BURST, "mpv-restart")
+        if fired == "proc" or (proc and proc.poll() is not None):
+            if restart(1.0):
+                pipe = ipc_connect()
+                reveal()
+                capture_poster()
+                trigger_burst(BURST, "mpv-restart")
             continue
 
         # 周期性轻微"动一下"（默认关闭）
@@ -876,21 +953,14 @@ def main():
                                 if not os.path.exists(poster_path(video)):
                                     pending_poster = True
                             else:
-                                restart()
-                                pipe = ipc_connect()
-                                reveal()
-                                capture_poster()
+                                if restart():
+                                    pipe = ipc_connect()
+                                    reveal()
+                                    capture_poster()
                                 print(f"switched (restart) -> {video}", flush=True)
                             trigger_burst(BURST, "switch")
                 except Exception:
                     pass
-
-        # 壁纸层重建（Explorer 重启 / 桌面层被系统换掉）
-        if now >= next_win:
-            next_win = now + 2
-            if not u.IsWindow(hwnd):
-                log("host window gone, rebuilding")
-                rebuild_host()
 
 
 if __name__ == "__main__":
