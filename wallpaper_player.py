@@ -24,6 +24,7 @@ import time
 import ctypes
 import shutil
 import subprocess
+import threading
 from ctypes import wintypes
 
 if getattr(sys, "frozen", False):
@@ -512,6 +513,55 @@ def ipc_pause(pipe, paused):
     return ipc_send(pipe, {"command": ["set_property", "pause", bool(paused)]})
 
 
+def ipc_get(prop, timeout=0.8):
+    """另开一条 IPC 连接查询属性。
+
+    主连接只用来下发命令（不读回包，否则事件流会把主循环卡住），
+    查询走独立连接，按 request_id 认出自己的回包就收工。
+    """
+    try:
+        p = open("\\\\.\\pipe\\" + PIPE_NAME, "r+b", buffering=0)
+    except OSError:
+        return None
+    out = {}
+    RID = 977
+
+    def worker():
+        try:
+            p.write((json.dumps({"command": ["get_property", prop],
+                                 "request_id": RID}) + "\n").encode("utf-8"))
+            buf = b""
+            t0 = time.time()
+            while time.time() - t0 < timeout:
+                chunk = p.read(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:
+                        continue
+                    if obj.get("request_id") == RID:
+                        out["v"] = obj.get("data")
+                        return
+        except Exception:
+            pass
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout + 0.3)
+    try:
+        p.close()
+    except Exception:
+        pass
+    return out.get("v")
+
+
 # ---------------------------------------------------------------- 单实例
 
 def acquire_single_instance():
@@ -613,6 +663,9 @@ def main():
     proc = hproc = pipe = None
     paused = None
     stray_until = 0.0
+    play_pos = 0.0          # 上次已知的播放位置（秒）
+    pos_video = video       # above 对应哪条视频，换片后自然失效
+    next_pos_poll = 0.0
 
     # 控制面板的指令事件（自动复位）
     ctl_stop = k32.CreateEventW(None, False, False, EVT_STOP)
@@ -696,8 +749,13 @@ def main():
         if not u.IsWindow(hwnd):
             log("launch aborted: host window invalid")
             return False
+        # 同一条视频重建（解锁 / 桌面层刷新）时接着上次的位置播，不要从头开始
+        start_opt = []
+        if pos_video == video and play_pos > 0.3:
+            start_opt.append(f"--start={play_pos:.3f}")
+            log(f"resume at {play_pos:.2f}s")
         proc = subprocess.Popen(
-            [mpv, f"--wid={hwnd}", "--loop=inf", "--no-audio", "--really-quiet",
+            [mpv, f"--wid={hwnd}", *start_opt, "--loop=inf", "--no-audio", "--really-quiet",
              "--no-osd-bar", "--osd-level=0", "--hwdec=auto-safe",
              "--video-unscaled=no", "--keepaspect=yes", "--panscan=0.0",
              "--no-input-default-bindings", "--no-osc", "--border=no",
@@ -922,6 +980,20 @@ def main():
                 if paused and pending_poster:
                     pending_poster = False
                     capture_poster()
+                # 记下暂停时的位置——这是稳态，解锁重建后要靠它接续
+                if paused:
+                    v = ipc_get("time-pos", timeout=0.6)
+                    if isinstance(v, (int, float)):
+                        play_pos = float(v)
+                        pos_video = video
+
+        # 播放中低频采样，覆盖"正在播的时候锁屏"的边角情况
+        if not want_paused and pipe and now >= next_pos_poll:
+            next_pos_poll = now + 3.0
+            v = ipc_get("time-pos", timeout=0.4)
+            if isinstance(v, (int, float)):
+                play_pos = float(v)
+                pos_video = video
 
         # 配置热更新（每秒）：换片 / 手动 nudget 触发一次播放
         if not cli_override and now >= next_cfg:
