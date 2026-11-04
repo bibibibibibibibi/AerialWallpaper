@@ -396,7 +396,11 @@ def ui_wndproc(hwnd, msg, wp, lp):
         if cid == ID_PLAY:
             if is_running():
                 signal_player(EVT_PLAY)
-                flash("已触发：播放中，几秒后自动定格")
+                try:
+                    secs = int(float(load_cfg().get("burst_seconds", 8)))
+                except Exception:
+                    secs = 8
+                flash(f"已触发：播放 {secs} 秒后自动定格")
             else:
                 start_player()
                 flash("播放器未运行，已启动")

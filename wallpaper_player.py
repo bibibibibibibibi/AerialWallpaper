@@ -707,7 +707,22 @@ def main():
         still = os.path.splitext(video)[0] + ".stopframe.jpg"
         if keep_frame and pipe:
             if ipc_send(pipe, {"command": ["screenshot-to-file", still, "video"]}):
-                time.sleep(0.6)
+                # mpv 编码 4K 帧可能要 1-2 秒：轮询等文件写完再往下走，
+                # 固定睡 0.6 秒会在慢的时候拿不到文件、桌面退回首帧海报（画面跳变）
+                prev_size, stable, t0 = -1, 0, time.time()
+                while time.time() - t0 < 3.0:
+                    try:
+                        sz = os.path.getsize(still)
+                    except OSError:
+                        sz = -1
+                    if sz > 0 and sz == prev_size:
+                        stable += 1
+                        if stable >= 2:      # 尺寸连续两拍不变 -> 写完了
+                            break
+                    else:
+                        stable = 0
+                    prev_size = sz
+                    time.sleep(0.15)
         try:
             if pipe:
                 pipe.close()
