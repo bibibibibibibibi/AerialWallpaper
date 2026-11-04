@@ -42,6 +42,7 @@ EVT_PLAY = "Global\\AerialWallpaper_ctl_play"
 DEFAULT_BURST = 8.0          # 亮屏后播放秒数
 DEFAULT_REFRESH_MIN = 0.0    # >0 则每 N 分钟轻微"动一下"，0=关闭
 DEFAULT_IDLE_TRIGGER = 20.0  # 空闲超过 N 秒后回来 -> 播一次
+ALWAYS_PLAY = False          # True = 一直播放，永不定格（config: always_play）
 
 
 # ---------------------------------------------------------------- 配置
@@ -620,7 +621,7 @@ def hide_stray_mpv(pid):
 
 
 def main():
-    global BURST
+    global BURST, ALWAYS_PLAY
     if not acquire_single_instance():
         print("已有实例在运行，退出。", file=sys.stderr)
         return
@@ -628,6 +629,7 @@ def main():
 
     cfg = load_config()
     BURST = float(arg("--burst", cfg.get("burst_seconds", DEFAULT_BURST)))
+    ALWAYS_PLAY = bool(cfg.get("always_play", False))
     refresh_min = float(cfg.get("refresh_minutes", DEFAULT_REFRESH_MIN))
     idle_trig = float(cfg.get("idle_trigger_seconds", DEFAULT_IDLE_TRIGGER))
     prev_idle = None
@@ -966,8 +968,8 @@ def main():
             next_refresh = now + refresh_min * 60
             trigger_burst(min(BURST, 6.0), "refresh")
 
-        # 暂停/恢复状态机
-        want_paused = STATE["force_pause"] or (now >= STATE["burst_until"])
+        # 暂停/恢复状态机：持续播放模式下只受熄屏约束，忽略 burst 到期
+        want_paused = STATE["force_pause"] or (not ALWAYS_PLAY and now >= STATE["burst_until"])
         if want_paused != paused:
             if pipe is None:
                 pipe = ipc_connect(timeout=2)
@@ -1011,6 +1013,12 @@ def main():
                                 log(f"burst -> {BURST:g}s")
                         except Exception:
                             pass
+                        ap = bool(cfgn.get("always_play", False))
+                        if ap != ALWAYS_PLAY:
+                            ALWAYS_PLAY = ap
+                            trigger_burst(10 ** 8 if ap else BURST, "always-play")
+                            log(f"always_play -> {ALWAYS_PLAY}")
+                            print(f"always_play -> {ALWAYS_PLAY}", flush=True)
                         nd = cfgn.get("nudge") or 0
                         if nd and nd != last_nudge:
                             last_nudge = nd

@@ -300,11 +300,12 @@ AMBER = 0x000953B4       # #b45309
 
 UI = {"hwnd": None, "state": None, "sub": None, "vid": None,
       "color": FG, "state_color": FG, "auto": None, "burst": None,
+      "always": None, "always_state": None,
       "hinst": None, "f_title": None, "f_big": None, "f_norm": None, "f_small": None,
       "bg_brush": None, "card_brush": None}
 
 ID_PLAY, ID_SWITCH, ID_STOP, ID_START, ID_SAVE = 1001, 1002, 1003, 1004, 1005
-ID_AUTO, ID_BURST = 1006, 1007
+ID_AUTO, ID_BURST, ID_ALWAYS = 1006, 1007, 1008
 
 
 def _font(px, bold=False):
@@ -343,7 +344,10 @@ def refresh_ui():
         else:
             UI["color"] = ACCENT
             txt = "状态：正在播放"
-            sub = "播放中（解码约 40% GPU），结束后自动冻结"
+            if cfg.get("always_play"):
+                sub = "持续播放已开启：一直动，只有熄屏时才暂停"
+            else:
+                sub = "播放中（解码约 40% GPU），结束后自动冻结"
     elif running:
         UI["color"] = MUTED
         txt, sub = "状态：启动中…", ""
@@ -358,6 +362,11 @@ def refresh_ui():
     v = current_video()
     u.SetWindowTextW(UI["vid"], ("当前视频：" + os.path.basename(v)) if v
                      else "当前视频：未设置（把 mp4 放进本目录，或点「换视频…」）")
+    # 复选框跟随配置（面板改完立刻写盘，所以这里不会抖动）
+    if UI.get("always"):
+        on = bool(cfg.get("always_play"))
+        u.SendMessageW(UI["always"], BM_SETCHECK, 1 if on else 0, 0)
+        u.SetWindowTextW(UI["always_state"], "持续播放：已开启" if on else "持续播放：未开启")
 
 
 def auto_toggle_async(enable):
@@ -413,6 +422,16 @@ def ui_wndproc(hwnd, msg, wp, lp):
             # 复选框点击后状态已切换，读当前状态即为用户意图
             want = bool(u.SendMessageW(UI["auto"], BM_GETCHECK, 0, 0))
             auto_toggle_async(want)
+        elif cid == ID_ALWAYS:
+            want = bool(u.SendMessageW(UI["always"], BM_GETCHECK, 0, 0))
+            cfg = load_cfg()
+            cfg["always_play"] = want
+            cfg["nudge"] = time.time()      # 立刻生效，不用等下一轮
+            save_cfg(cfg)
+            if want and not is_running():
+                start_player()
+            flash("已开启：壁纸会一直动，只有熄屏时才暂停" if want
+                  else "已关闭：恢复为亮屏播几秒后定格", 6.0)
         u.InvalidateRect(UI["state"], None, True)
         refresh_ui()
         return 0
@@ -533,6 +552,15 @@ def run_ui():
     UI["auto_state"] = _ctrl(hwnd, "STATIC", "自启：检查中…",
                              WS_CHILD | WS_VISIBLE, M + 210 * S, y + 3 * S, 200 * S, 18 * S)
     _setfont(UI["auto_state"], f_small)
+    y += 32 * S
+
+    UI["always"] = _ctrl(hwnd, "BUTTON", "让壁纸一直动",
+                         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
+                         M, y, 200 * S, 22 * S, ID_ALWAYS)
+    _setfont(UI["always"], f_norm)
+    UI["always_state"] = _ctrl(hwnd, "STATIC", "持续播放：未开启",
+                               WS_CHILD | WS_VISIBLE, M + 210 * S, y + 3 * S, 220 * S, 18 * S)
+    _setfont(UI["always_state"], f_small)
     y += 32 * S
 
     lbl = _ctrl(hwnd, "STATIC", "亮屏后播放（秒，3–30）", WS_CHILD | WS_VISIBLE, M, y + 3 * S,
