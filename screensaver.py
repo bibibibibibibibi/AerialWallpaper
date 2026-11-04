@@ -76,6 +76,7 @@ def launch_mpv(hwnd, video, cfg):
         raise SystemExit("找不到 mpv.exe")
     return subprocess.Popen(
         [mpv, f"--wid={hwnd}", "--loop=inf", "--no-audio", "--really-quiet",
+         "--no-stop-screensaver",
          "--no-osd-bar", "--osd-level=0", "--hwdec=auto-safe",
          "--keepaspect=yes", "--panscan=0.0",
          "--no-input-default-bindings", "--no-osc", "--border=no",

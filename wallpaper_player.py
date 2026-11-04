@@ -760,6 +760,7 @@ def main():
             log(f"resume at {play_pos:.2f}s")
         proc = subprocess.Popen(
             [mpv, f"--wid={hwnd}", *start_opt, "--loop=inf", "--no-audio", "--really-quiet",
+             "--no-stop-screensaver",
              "--no-osd-bar", "--osd-level=0", "--hwdec=auto-safe",
              "--video-unscaled=no", "--keepaspect=yes", "--panscan=0.0",
              "--no-input-default-bindings", "--no-osc", "--border=no",
@@ -767,6 +768,7 @@ def main():
              "--keep-open=yes", video],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         hproc = k32.OpenProcess(PROCESS_SYNCHRONIZE, False, proc.pid)
+        log(f"mpv pid={proc.pid} screensaver-inhibit=off (--no-stop-screensaver)")
         hs = k32.OpenProcess(PROCESS_SET_INFORMATION, False, proc.pid)
         if hs:
             k32.SetPriorityClass(hs, BELOW_NORMAL_PRIORITY_CLASS)
