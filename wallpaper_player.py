@@ -38,6 +38,7 @@ PIPE_NAME = "aerial_wallpaper_mpv"
 # 控制面板 → 播放器的命名事件（毫秒级指令通道，不依赖进程名/命令行匹配）
 EVT_STOP = "Global\\AerialWallpaper_ctl_stop"
 EVT_PLAY = "Global\\AerialWallpaper_ctl_play"
+EVT_PAUSE = "Global\\AerialWallpaper_ctl_pause"   # 屏保启动时让壁纸静下来，省一路解码
 
 DEFAULT_BURST = 8.0          # 亮屏后播放秒数
 DEFAULT_REFRESH_MIN = 0.0    # >0 则每 N 分钟轻微"动一下"，0=关闭
@@ -672,7 +673,8 @@ def main():
     # 控制面板的指令事件（自动复位）
     ctl_stop = k32.CreateEventW(None, False, False, EVT_STOP)
     ctl_play = k32.CreateEventW(None, False, False, EVT_PLAY)
-    for h in (ctl_stop, ctl_play):
+    ctl_pause = k32.CreateEventW(None, False, False, EVT_PAUSE)
+    for h in (ctl_stop, ctl_play, ctl_pause):
         if h:
             k32.ResetEvent(h)
 
@@ -911,6 +913,8 @@ def main():
             items.append(("stop", ctl_stop))
         if ctl_play:
             items.append(("play", ctl_play))
+        if ctl_pause:
+            items.append(("pause", ctl_pause))
         arr = (wintypes.HANDLE * max(1, len(items)))(*[h for _, h in items]) if items else None
         r = u.MsgWaitForMultipleObjects(len(items), arr, False, 200, QS_ALLINPUT)
         fired = items[r][0] if (arr is not None and 0 <= r < len(items)) else None
@@ -925,6 +929,12 @@ def main():
         if fired == "play":
             trigger_burst(BURST, "panel")
             write_status("panel")
+        if fired == "pause":
+            # 屏幕保护程序启动：让壁纸静下来，屏保退出后由 EVT_PLAY 恢复
+            STATE["burst_until"] = 0.0
+            STATE["force_pause"] = True
+            log("paused by screensaver")
+            write_status("screensaver")
 
         now = time.time()
 

@@ -305,7 +305,7 @@ UI = {"hwnd": None, "state": None, "sub": None, "vid": None,
       "bg_brush": None, "card_brush": None}
 
 ID_PLAY, ID_SWITCH, ID_STOP, ID_START, ID_SAVE = 1001, 1002, 1003, 1004, 1005
-ID_AUTO, ID_BURST, ID_ALWAYS = 1006, 1007, 1008
+ID_AUTO, ID_BURST, ID_ALWAYS, ID_INSTALL = 1006, 1007, 1008, 1009
 
 
 def _font(px, bold=False):
@@ -432,6 +432,14 @@ def ui_wndproc(hwnd, msg, wp, lp):
                 start_player()
             flash("已开启：壁纸会一直动，只有熄屏时才暂停" if want
                   else "已关闭：恢复为亮屏播几秒后定格", 6.0)
+        elif cid == ID_INSTALL:
+            try:
+                import screensaver
+                ok, info = screensaver.install_screensaver()
+            except Exception as e:
+                ok, info = False, str(e)
+            flash("屏保已安装并启用（等待 10 分钟触发；在系统屏保设置里可调整）" if ok
+                  else "屏保安装失败：" + info, 7.0)
         u.InvalidateRect(UI["state"], None, True)
         refresh_ui()
         return 0
@@ -500,7 +508,7 @@ def run_ui():
     wc.lpszClassName = "AerialWallpaperUI"
     u.RegisterClassW(ctypes.byref(wc))
 
-    W, Ht = int(470 * S), int(430 * S)
+    W, Ht = int(470 * S), int(472 * S)
     sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
     hwnd = u.CreateWindowExW(0, "AerialWallpaperUI", "动态壁纸 · 控制面板",
                              0x00CF0000 | 0x00020000,   # OVERLAPPEDWINDOW | WS_MINIMIZEBOX
@@ -536,12 +544,14 @@ def run_ui():
 
     bw = (430 * S - 12 * S) / 2
     defs = [("立即动一下", ID_PLAY), ("换视频…", ID_SWITCH),
-            ("停止壁纸", ID_STOP), ("启动壁纸", ID_START)]
+            ("停止壁纸", ID_STOP), ("启动壁纸", ID_START),
+            ("安装屏保", ID_INSTALL)]
+    rows = (len(defs) + 1) // 2
     for i, (txt, cid) in enumerate(defs):
         b = _ctrl(hwnd, "BUTTON", txt, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                   M + (i % 2) * (bw + 12 * S), y + (i // 2) * (34 * S + 6 * S), bw, 32 * S, cid)
         _setfont(b, f_norm)
-    y += 2 * (34 * S + 6 * S) + 6 * S
+    y += rows * (34 * S + 6 * S) + 6 * S
 
     UI["auto"] = _ctrl(hwnd, "BUTTON", "开机自动运行",
                        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
@@ -658,6 +668,14 @@ def ensure_console():
 
 def main():
     args = sys.argv[1:]
+    # 屏幕保护程序调用约定：/s 全屏 /c 配置 /p <hwnd> 预览；
+    # 无参数且以 .scr 运行时按 /s 处理（复制出的 AerialScreensaver.scr 走这里）
+    scr_flags = {"/s", "-s", "/c", "-c", "/p", "-p", "/l"}
+    if any(a.lower() in scr_flags for a in args) or \
+            (not args and sys.executable.lower().endswith(".scr")):
+        import screensaver
+        screensaver.main()
+        return
     if "--run" in args:
         import wallpaper_player
         wallpaper_player.main()
