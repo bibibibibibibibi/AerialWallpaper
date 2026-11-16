@@ -622,6 +622,21 @@ def run_ui():
         u.DispatchMessageW(ctypes.byref(msg))
 
 
+def _pick_initial_dir():
+    """换视频对话框的初始目录：当前配置视频所在目录 → 视频库目录 → 程序目录"""
+    try:
+        cur = os.path.abspath(load_cfg().get("video", ""))
+        d = os.path.dirname(cur)
+        if os.path.isdir(d):
+            return d
+    except Exception:
+        pass
+    lib = os.path.join("X:\\", "动态壁纸视频")
+    if os.path.isdir(lib):
+        return lib
+    return APP_DIR
+
+
 def pick_video():
     """comdlg32 打开文件对话框，返回所选路径或 None"""
     try:
@@ -647,6 +662,7 @@ def pick_video():
         ofn.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
         ofn.nMaxFile = 1024
         ofn.lpstrTitle = "选择壁纸视频"
+        ofn.lpstrInitialDir = _pick_initial_dir()
         ofn.Flags = 0x00001000 | 0x00000800 | 0x00000004   # FILEMUSTEXIST|PATHMUSTEXIST|HIDEREADONLY
         if comdlg.GetOpenFileNameW(ctypes.byref(ofn)):
             return buf.value
