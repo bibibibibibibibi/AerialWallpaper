@@ -234,10 +234,13 @@ u.GetClientRect.argtypes = [H, ctypes.c_void_p]
 u.InvalidateRect.argtypes = [H, ctypes.c_void_p, wintypes.BOOL]
 g32.CreateSolidBrush.restype = wintypes.HBRUSH
 g32.CreateSolidBrush.argtypes = [wintypes.COLORREF]
+g32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+g32.DeleteObject.restype = wintypes.BOOL
 g32.CreateFontW.restype = wintypes.HFONT
 g32.CreateFontW.argtypes = [ctypes.c_int] * 13 + [wintypes.LPCWSTR]
 u.FillRect.argtypes = [wintypes.HDC, ctypes.c_void_p, wintypes.HBRUSH]
 u.SendMessageW.argtypes = [H, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+u.SendMessageW.restype = ctypes.c_ssize_t     # STM_SETIMAGE 返回旧 HBITMAP（64 位句柄）
 g32.SetTextColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
 g32.SetBkMode.argtypes = [wintypes.HDC, ctypes.c_int]
 g32.SetBkColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
@@ -300,12 +303,68 @@ AMBER = 0x000953B4       # #b45309
 
 UI = {"hwnd": None, "state": None, "sub": None, "vid": None,
       "color": FG, "state_color": FG, "auto": None, "burst": None,
-      "always": None, "always_state": None,
+      "always": None, "always_state": None, "preview": None, "liblist": None,
       "hinst": None, "f_title": None, "f_big": None, "f_norm": None, "f_small": None,
       "bg_brush": None, "card_brush": None}
 
 ID_PLAY, ID_SWITCH, ID_STOP, ID_START, ID_SAVE = 1001, 1002, 1003, 1004, 1005
 ID_AUTO, ID_BURST, ID_ALWAYS, ID_INSTALL = 1006, 1007, 1008, 1009
+ID_LIBLIST = 1010          # 视频库 ListBox（通知码走 WM_COMMAND）
+ID_LIBUSE = 1011           # 「使用此视频」按钮
+
+# 视频库列表：扫描视频目录得到的可选项
+LIB = {"items": [],        # [(显示名, 视频绝对路径, 缩略图路径)]
+       "preview_path": "", # 当前预览的缩略图 JPG 路径
+       "preview_rect": None}  # 预览区在主窗口客户区的坐标 (x, y, w, h)
+
+
+# ---- GDI+：把 JPG 缩略图转成 HBITMAP 给 Static 控件显示（系统自带，无第三方依赖）----
+try:
+    _gdip = ctypes.WinDLL("gdiplus")
+
+    class _GdiPlusStartupInput(ctypes.Structure):
+        _fields_ = [("GdiplusVersion", ctypes.c_uint32),
+                    ("DebugEventCallback", ctypes.c_void_p),
+                    ("SuppressBackgroundThread", ctypes.c_int),
+                    ("SuppressExternalCodecs", ctypes.c_int)]
+
+    _gdip.GdiplusStartup.argtypes = [ctypes.POINTER(ctypes.c_size_t),
+                                     ctypes.POINTER(_GdiPlusStartupInput), ctypes.c_void_p]
+    _gdip.GdipLoadImageFromFile.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    _gdip.GdipCreateHBITMAPFromBitmap.argtypes = [ctypes.c_void_p,
+                                                  ctypes.POINTER(wintypes.HBITMAP),
+                                                  wintypes.DWORD]   # ARGB 颜色
+    _gdip.GdipDisposeImage.argtypes = [ctypes.c_void_p]
+    _gdip.GdipCreateFromHDC.argtypes = [wintypes.HDC, ctypes.POINTER(ctypes.c_void_p)]
+    _gdip.GdipDrawImageRectI.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    _gdip.GdipDeleteGraphics.argtypes = [ctypes.c_void_p]
+    _gdi_token = ctypes.c_size_t()
+    _gdi_in = _GdiPlusStartupInput()
+    _gdi_in.GdiplusVersion = 1
+    _gdip_ok = (_gdip.GdiplusStartup(ctypes.byref(_gdi_token), ctypes.byref(_gdi_in), None) == 0)
+except Exception:
+    _gdip = None
+    _gdip_ok = False
+
+
+def jpg_to_hbitmap(path):
+    """GDI+ 加载 JPG -> HBITMAP；失败返回 None"""
+    if not (_gdip and _gdip_ok and path and os.path.exists(path)):
+        return None
+    img = ctypes.c_void_p()
+    hbm = wintypes.HBITMAP()
+    try:
+        if _gdip.GdipLoadImageFromFile(path, ctypes.byref(img)) != 0 or not img.value:
+            return None
+        if _gdip.GdipCreateHBITMAPFromBitmap(img, ctypes.byref(hbm), 0xFFFFFFFF) != 0 or not hbm.value:
+            return None
+        return hbm.value
+    except Exception:
+        return None
+    finally:
+        if img.value:
+            _gdip.GdipDisposeImage(img)
 
 
 def _font(px, bold=False):
@@ -329,6 +388,99 @@ def flash(text, secs=4.0):
     UI["flash"] = (text, time.time() + secs)
 
 
+# ---- 视频库：扫描 / 预览 / 应用 ----
+
+def video_dir():
+    """视频库目录：优先当前配置视频所在目录，其次 X:\动态壁纸视频"""
+    try:
+        d = os.path.dirname(os.path.abspath(load_cfg().get("video", "")))
+        if os.path.isdir(d):
+            return d
+    except Exception:
+        pass
+    lib = os.path.join("X:\\", "动态壁纸视频")
+    return lib if os.path.isdir(lib) else APP_DIR
+
+
+def friendly_name(path):
+    """Africa_Night_1_4K.mov -> 非洲之夜？ 这里只做去后缀+下划线转空格"""
+    s = os.path.splitext(os.path.basename(path))[0]
+    return s.replace("_", " ")
+
+
+def scan_library():
+    """扫描视频目录，构建 LIB['items'] = [(显示名, 视频路径, 缩略图路径)]"""
+    d = video_dir()
+    thumb_dir = os.path.join(d, ".thumbs")
+    items = []
+    try:
+        for fn in sorted(os.listdir(d)):
+            if not fn.lower().endswith(VIDEO_EXT):
+                continue
+            p = os.path.join(d, fn)
+            if not os.path.isfile(p):
+                continue
+            th = os.path.join(thumb_dir, os.path.splitext(fn)[0] + ".jpg")
+            items.append((friendly_name(p), p, th if os.path.exists(th) else ""))
+    except Exception:
+        pass
+    LIB["items"] = items
+    return items
+
+
+def show_preview(index):
+    """记录第 index 个视频的缩略图路径，触发主窗口重绘"""
+    items = LIB.get("items", [])
+    LIB["preview_path"] = items[index][2] if (0 <= index < len(items)) else ""
+    if UI.get("hwnd"):
+        u.InvalidateRect(UI["hwnd"], None, True)
+
+
+def draw_preview(hdc):
+    """在预览区用 GDI+ 直接绘 JPG（绕开 Static 控件的 64 位位图句柄问题）"""
+    rect = LIB.get("preview_rect")
+    if not rect or not (_gdip and _gdip_ok):
+        return
+    x, y, w, h = rect
+    # 白色底 + 边框
+    br = g32.CreateSolidBrush(0x00FFFFFF)
+    rc = wintypes.RECT(x, y, x + w, y + h)
+    u.FillRect(hdc, ctypes.byref(rc), br)
+    g32.DeleteObject(br)
+    path = LIB.get("preview_path")
+    if not path or not os.path.exists(path):
+        return
+    img = ctypes.c_void_p()
+    if _gdip.GdipLoadImageFromFile(path, ctypes.byref(img)) != 0 or not img.value:
+        return
+    gfx = ctypes.c_void_p()
+    try:
+        if _gdip.GdipCreateFromHDC(hdc, ctypes.byref(gfx)) == 0 and gfx.value:
+            # 等比缩放居中
+            _gdip.GdipDrawImageRectI(gfx, img, x + 4, y + 4, w - 8, h - 8)
+            _gdip.GdipDeleteGraphics(gfx)
+    except Exception:
+        pass
+    finally:
+        _gdip.GdipDisposeImage(img)
+
+
+def apply_library_video(index):
+    """把选中的视频设为壁纸（写配置 + nudge 让播放器热切换）"""
+    items = LIB.get("items", [])
+    if not (0 <= index < len(items)):
+        return
+    path = items[index][1]
+    cfg = load_cfg()
+    cfg["video"] = os.path.abspath(path)
+    cfg["nudge"] = time.time()
+    save_cfg(cfg)
+    if not is_running():
+        start_player()
+    u.SetWindowTextW(UI["vid"], "当前视频：" + os.path.basename(path))
+    flash(f"已设为壁纸：{friendly_name(path)}")
+
+
 def refresh_ui():
     """WM_TIMER：刷新状态显示"""
     running = is_running()
@@ -339,7 +491,7 @@ def refresh_ui():
             UI["color"] = GREEN
             txt = "状态：已冻结（定格最后一帧）"
             age = int(time.time() - float(st.get("ts", time.time())))
-            sub = (f"静止 {age} 秒 · 开销≈0 · 亮屏/解锁/回来时会自动播放 "
+            sub = (f"静止 {age} 秒 · 开销≈0 · 回到桌面（亮屏/解锁/屏保退出）自动播放 "
                    f"{int(float(cfg.get('burst_seconds', 8)))} 秒")
         else:
             UI["color"] = ACCENT
@@ -421,7 +573,7 @@ def ui_wndproc(hwnd, msg, wp, lp):
                 v = 8
             cfg = load_cfg(); cfg["burst_seconds"] = v; save_cfg(cfg)
             u.SetWindowTextW(UI["burst"], str(v))
-            flash(f"已保存：亮屏后播放 {v} 秒（立即生效）", 5.0)
+            flash(f"已保存：回到桌面后播放 {v} 秒（立即生效）", 5.0)
         elif cid == ID_AUTO:
             # 复选框点击后状态已切换，读当前状态即为用户意图
             want = bool(u.SendMessageW(UI["auto"], BM_GETCHECK, 0, 0))
@@ -434,8 +586,8 @@ def ui_wndproc(hwnd, msg, wp, lp):
             save_cfg(cfg)
             if want and not is_running():
                 start_player()
-            flash("已开启：壁纸会一直动，只有熄屏时才暂停" if want
-                  else "已关闭：恢复为亮屏播几秒后定格", 6.0)
+            flash("已开启：壁纸持续播放，仅锁屏/熄屏/屏保时暂停" if want
+                  else "已关闭：恢复为回到桌面播几秒后定格", 6.0)
         elif cid == ID_INSTALL:
             try:
                 import screensaver
@@ -444,6 +596,18 @@ def ui_wndproc(hwnd, msg, wp, lp):
                 ok, info = False, str(e)
             flash("屏保已安装并启用（等待 10 分钟触发；在系统屏保设置里可调整）" if ok
                   else "屏保安装失败：" + info, 7.0)
+        elif cid == ID_LIBLIST:
+            # ListBox 通知：LBN_SELCHANGE=1（点选预览），LBN_DBLCLK=2（双击设为壁纸）
+            code = (wp >> 16) & 0xFFFF
+            idx = u.SendMessageW(UI["liblist"], 0x0188, 0, 0)  # LB_GETCURSEL
+            if code in (1, 2) and idx >= 0:
+                show_preview(idx)
+                if code == 2:
+                    apply_library_video(idx)
+        elif cid == ID_LIBUSE:
+            idx = u.SendMessageW(UI["liblist"], 0x0188, 0, 0)
+            if idx >= 0:
+                apply_library_video(idx)
         u.InvalidateRect(UI["state"], None, True)
         refresh_ui()
         return 0
@@ -459,7 +623,9 @@ def ui_wndproc(hwnd, msg, wp, lp):
     if msg == WM_ERASEBKGND:
         rect = wintypes.RECT()
         u.GetClientRect(hwnd, ctypes.byref(rect))
-        u.FillRect(wintypes.HDC(wp), ctypes.byref(rect), UI["bg_brush"])
+        hdc = wintypes.HDC(wp)
+        u.FillRect(hdc, ctypes.byref(rect), UI["bg_brush"])
+        draw_preview(hdc)      # 视频库缩略图直接画在预览区
         return 1
     if msg == WM_CLOSE:
         u.DestroyWindow(hwnd)
@@ -512,7 +678,8 @@ def run_ui():
     wc.lpszClassName = "AerialWallpaperUI"
     u.RegisterClassW(ctypes.byref(wc))
 
-    W, Ht = int(470 * S), int(472 * S)
+    # 左侧控制区 470 + 右侧视频库 400
+    W, Ht = int(886 * S), int(600 * S)
     sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
     hwnd = u.CreateWindowExW(0, "AerialWallpaperUI", "动态壁纸 · 控制面板",
                              0x00CF0000 | 0x00020000,   # OVERLAPPEDWINDOW | WS_MINIMIZEBOX
@@ -535,7 +702,7 @@ def run_ui():
 
     t1 = _ctrl(hwnd, "STATIC", "动态壁纸", WS_CHILD | WS_VISIBLE, M, y, 300 * S, 24 * S)
     _setfont(t1, f_title); y += 28 * S
-    t2 = _ctrl(hwnd, "STATIC", "亮屏 / 解锁后播放几秒，其余时间定格——几乎零开销",
+    t2 = _ctrl(hwnd, "STATIC", "回到桌面（亮屏/解锁/屏保退出）播放几秒，其余时间定格——几乎零开销",
                WS_CHILD | WS_VISIBLE, M, y, 430 * S, 18 * S)
     _setfont(t2, f_small); y += 26 * S
 
@@ -577,7 +744,7 @@ def run_ui():
     _setfont(UI["always_state"], f_small)
     y += 32 * S
 
-    lbl = _ctrl(hwnd, "STATIC", "亮屏后播放（秒，3–30）", WS_CHILD | WS_VISIBLE, M, y + 3 * S,
+    lbl = _ctrl(hwnd, "STATIC", "回到桌面后播放（秒，3–30）", WS_CHILD | WS_VISIBLE, M, y + 3 * S,
                 150 * S, 18 * S)
     _setfont(lbl, f_norm)
     UI["burst"] = _ctrl(hwnd, "EDIT", str(int(float(load_cfg().get("burst_seconds", 8)))),
@@ -591,6 +758,52 @@ def run_ui():
 
     foot = _ctrl(hwnd, "STATIC", f"目录：{APP_DIR}", WS_CHILD | WS_VISIBLE, M, y, 430 * S, 30 * S)
     _setfont(foot, f_small)
+
+    # ---------------- 右侧：视频库列表 + 缩略预览 ----------------
+    RX = int(482 * S)            # 右栏起点
+    RW = int(386 * S)            # 右栏宽度
+    sep = u.CreateWindowExW(0, "STATIC", None, WS_CHILD | WS_VISIBLE | 0x0001,  # SS_ETCHEDVERT
+                            RX - int(8 * S), M, 2, Ht - 2 * M, None, None, hinst, None)
+    lib_title = _ctrl(hwnd, "STATIC", "视频库（点击预览 · 双击设为壁纸）",
+                      WS_CHILD | WS_VISIBLE, RX, M, RW, int(22 * S))
+    _setfont(lib_title, f_big)
+    ry = M + int(28 * S)
+
+    # ListBox：LBS_NOTIFY(1) | LBS_HASSTRINGS(64) | WS_VSCROLL(0x200000) | WS_BORDER
+    UI["liblist"] = u.CreateWindowExW(
+        0, "ListBox", None,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | 0x0001 | 0x0040 | 0x00200000,
+        RX, ry, RW, int(300 * S), hwnd, ID_LIBLIST, hinst, None)
+    _setfont(UI["liblist"], f_norm)
+    ry += int(306 * S)
+
+    pv_label = _ctrl(hwnd, "STATIC", "预览", WS_CHILD | WS_VISIBLE, RX, ry, RW, int(18 * S))
+    _setfont(pv_label, f_small)
+    ry += int(20 * S)
+
+    # 预览区：不再用 Static SS_BITMAP（跨进程/64 位句柄不可靠），
+    # 直接在主窗口 WM_PAINT 中绘 JPG；这里只记坐标。
+    LIB["preview_rect"] = (RX, ry, RW, int(180 * S))
+    ry += int(188 * S)
+
+    use = _ctrl(hwnd, "BUTTON", "使用此视频", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                RX, ry, int(RW / 2 - 4 * S), int(32 * S), ID_LIBUSE)
+    _setfont(use, f_norm)
+
+    # 填充列表：扫描视频目录，选中当前正在用的那条
+    items = scan_library()
+    LB_ADDSTRING, LB_SETCURSEL = 0x0180, 0x0186
+    cur = os.path.basename(load_cfg().get("video", "")).lower()
+    sel = 0
+    for i, (disp, path, th) in enumerate(items):
+        dbuf = ctypes.create_unicode_buffer(disp)
+        u.SendMessageW(UI["liblist"], LB_ADDSTRING, 0,
+                       wintypes.LPARAM(ctypes.addressof(dbuf)))
+        if os.path.basename(path).lower() == cur:
+            sel = i
+    if items:
+        u.SendMessageW(UI["liblist"], LB_SETCURSEL, sel, 0)
+        show_preview(sel)
 
     # 换视频按钮的真实实现（Win32 打开文件对话框，无第三方依赖）
     def switch_video_dialog():

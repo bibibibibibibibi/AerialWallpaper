@@ -106,10 +106,17 @@ def step_a():
     time.sleep(2)
     check("A2 动一下后正在播放", status().get("paused") is False, str(status())[:90])
     import wallpaper_player as wp
-    p1 = wp.ipc_get("time-pos", 1.5)
+    # 刚触发播放时 mpv IPC 可能还没就绪，time-pos 返回 None；重试拿起始值
+    p1 = None
+    for _ in range(8):
+        v = wp.ipc_get("time-pos", 1.0)
+        if isinstance(v, (int, float)):
+            p1 = float(v)
+            break
+        time.sleep(0.5)
     time.sleep(3)
     p2 = wp.ipc_get("time-pos", 1.5)
-    check("A3 画面确实推进", isinstance(p1, float) and isinstance(p2, float) and p2 > p1,
+    check("A3 画面确实推进", p1 is not None and isinstance(p2, (int, float)) and p2 > p1,
           f"{p1} -> {p2}")
     time.sleep(5)
     check("A4 5秒后自动定格", status().get("paused") is True, str(status())[:90])

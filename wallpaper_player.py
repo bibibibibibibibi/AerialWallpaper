@@ -2,10 +2,16 @@
 """
 视频动态壁纸（Windows 10/11）—— 低功耗版
 
-行为：
-  亮屏 / 解锁 / 登录后 -> 播放 burst_seconds 秒（默认 8s）-> 冻结在最后一帧
-  屏幕关闭、锁屏 -> 立刻暂停解码
-  其余时间完全不解码（GPU 解码引擎归零，几乎零开销）
+行为（状态机）：
+  【动】回到桌面（亮屏 / 解锁 / 切回会话 / 屏保退出）-> 播放 burst_seconds 秒
+       手动触发：面板「立即动一下」、换片、启动
+  【停】四种定格方式：
+       1. 播满 burst_seconds 秒（「一直动」开启时除外，此时持续播放）
+       2. 熄屏（显示器关了就没必要解码）
+       3. 锁屏（黑屏界面后面不需要 4K 解码）
+       4. 屏保运行中（画面让给屏保，屏保退出后自动恢复播放）
+       「停止壁纸」= 播放器整个退出，桌面定格为退出瞬间的画面
+  其余定格时间完全不解码（GPU 解码引擎归零，几乎零开销）
 
 原理：
   1. 向 Progman 发送 0x052C 让系统在其下分出子 WorkerW（壁纸层）
@@ -245,6 +251,7 @@ WM_WTSSESSION_CHANGE = 0x02B1
 HTTRANSPARENT = -1
 
 WTS_CONSOLE_CONNECT = 0x1
+WTS_SESSION_LOCK = 0x7
 WTS_SESSION_UNLOCK = 0x8
 
 QS_ALLINPUT = 0x04FF
@@ -287,7 +294,14 @@ def _wndproc(hwnd, msg, wp, lp):
             pass
     elif msg == WM_WTSSESSION_CHANGE:
         if wp in (WTS_SESSION_UNLOCK, WTS_CONSOLE_CONNECT):
+            # 回到桌面：播 burst 秒后自动定格
             trigger_burst(BURST, "unlock" if wp == WTS_SESSION_UNLOCK else "console-connect")
+        elif wp == WTS_SESSION_LOCK:
+            # 锁屏：黑屏界面后面不需要 4K 解码，定格省电。
+            # 之前只处理熄屏/屏保，锁屏后到熄屏前的几分钟里视频在黑屏后面白跑。
+            STATE["burst_until"] = 0.0
+            STATE["force_pause"] = True
+            STATE["log"].append("lock")
     return u.DefWindowProcW(hwnd, msg, wp, lp)
 
 
