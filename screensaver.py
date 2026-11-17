@@ -25,7 +25,7 @@ APP_DIR = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
-from wallpaper_player import EVT_PAUSE, EVT_PLAY  # noqa: E402
+from wallpaper_player import EVT_PAUSE, EVT_SAVER_QUIT  # noqa: E402
 
 SAVER_NAME = "AerialWallpaperSaver"
 SAVER_TITLE = "AerialVideoSaver"
@@ -223,8 +223,8 @@ def run_fullscreen():
             u.DestroyWindow(hwnd)
         except Exception:
             pass
-        # 屏保退出 -> 唤醒壁纸继续播
-        signal_event(EVT_PLAY)
+        # 屏保退出 -> 用专用通道恢复壁纸（只解除 saver 暂停，不误清熄屏/锁屏）
+        signal_event(EVT_SAVER_QUIT)
 
 
 # ---------------------------------------------------------------- 预览 / 配置

@@ -497,7 +497,7 @@ def refresh_ui():
             UI["color"] = ACCENT
             txt = "状态：正在播放"
             if cfg.get("always_play"):
-                sub = "持续播放已开启：一直动，只有熄屏时才暂停"
+                sub = "持续播放已开启：锁屏/熄屏/屏保时暂停，回到桌面自动恢复"
             else:
                 sub = "播放中（解码约 40% GPU），结束后自动冻结"
     elif running:
@@ -563,9 +563,12 @@ def ui_wndproc(hwnd, msg, wp, lp):
             ok = stop_player()
             flash("已停止，桌面定格为当前视频画面" if ok else "停止未完成，请再点一次", 5.0)
         elif cid == ID_START:
-            flash("正在启动…", 2.0)
-            start_player()
-            flash("已启动，画面就绪后接管桌面", 5.0)
+            if is_running():
+                flash("壁纸已在运行；想立刻播放请点「立即动一下」", 5.0)
+            else:
+                flash("正在启动…", 2.0)
+                start_player()
+                flash("已启动，画面就绪后接管桌面", 5.0)
         elif cid == ID_SAVE:
             try:
                 v = max(3, min(30, int(_get_edit_text(UI["burst"]) or 8)))

@@ -5,12 +5,16 @@
 行为（状态机）：
   【动】回到桌面（亮屏 / 解锁 / 切回会话 / 屏保退出）-> 播放 burst_seconds 秒
        手动触发：面板「立即动一下」、换片、启动
-  【停】四种定格方式：
+  【停】暂停原因按「来源」分别记录，各自的事件才清除各自的暂停：
        1. 播满 burst_seconds 秒（「一直动」开启时除外，此时持续播放）
-       2. 熄屏（显示器关了就没必要解码）
-       3. 锁屏（黑屏界面后面不需要 4K 解码）
-       4. 屏保运行中（画面让给屏保，屏保退出后自动恢复播放）
+       2. 熄屏  -> 只由亮屏解除
+       3. 锁屏  -> 只由解锁/切回会话解除
+       4. 屏保运行中 -> 只由屏保退出(或面板「立即动一下」)解除
        「停止壁纸」= 播放器整个退出，桌面定格为退出瞬间的画面
+  关键：内部事件（定时动一下 / nudge / 换片 / 宿主重建）只延长播放时长，
+  **不解除上面 2/3/4 的暂停**——否则熄屏/锁屏后面会偷偷解码。
+  长时间离开兜底（idle_trigger_seconds，默认 300 秒）只在无人超过该时长后
+  重新有输入时触发一次；正常工作中的短暂停顿不会误触发。
   其余定格时间完全不解码（GPU 解码引擎归零，几乎零开销）
 
 原理：
@@ -45,10 +49,13 @@ PIPE_NAME = "aerial_wallpaper_mpv"
 EVT_STOP = "Global\\AerialWallpaper_ctl_stop"
 EVT_PLAY = "Global\\AerialWallpaper_ctl_play"
 EVT_PAUSE = "Global\\AerialWallpaper_ctl_pause"   # 屏保启动时让壁纸静下来，省一路解码
+EVT_SAVER_QUIT = "Global\\AerialWallpaper_ctl_saver_quit"  # 屏保退出，专用恢复通道
 
-DEFAULT_BURST = 8.0          # 亮屏后播放秒数
+DEFAULT_BURST = 8.0          # 回到桌面后播放秒数
 DEFAULT_REFRESH_MIN = 0.0    # >0 则每 N 分钟轻微"动一下"，0=关闭
-DEFAULT_IDLE_TRIGGER = 20.0  # 空闲超过 N 秒后回来 -> 播一次
+# 无人操作超过这么久再重新有输入，才算「离开后回来」播一次。
+# 20 秒太短——正常工作时停顿一下就会被当成回来，导致反复播放。默认 5 分钟。
+DEFAULT_IDLE_TRIGGER = 300.0
 ALWAYS_PLAY = False          # True = 一直播放，永不定格（config: always_play）
 
 
@@ -265,12 +272,25 @@ NOTIFY_FOR_THIS_SESSION = 0x0
 CLASS_NAME = "AerialWallpaperHost"
 
 # 事件状态：wndproc 写，主循环读（同一线程）
-STATE = {"burst_until": 0.0, "force_pause": False, "log": []}
+# blockers：暂停原因集合，按来源分别记录、分别清除。
+#   取值：{"display"(熄屏), "lock"(锁屏), "saver"(屏保)}
+# 不在 trigger_burst 里统一清空——那是所有误播的根源。
+STATE = {"burst_until": 0.0, "blockers": set(), "log": []}
 
 
 def trigger_burst(seconds, why=""):
+    """延长/开始一轮播放。注意：不清除任何 blocker（暂停原因各自负责解除）。"""
     STATE["burst_until"] = time.time() + seconds
-    STATE["force_pause"] = False
+    if why:
+        STATE["log"].append(why)
+
+
+def block(key, on, why=""):
+    """设置/清除一个暂停原因。只有对应事件才会调用清除。"""
+    if on:
+        STATE["blockers"].add(key)
+    else:
+        STATE["blockers"].discard(key)
     if why:
         STATE["log"].append(why)
 
@@ -285,23 +305,21 @@ def _wndproc(hwnd, msg, wp, lp):
             pbs = ctypes.cast(lp, ctypes.POINTER(POWERBROADCAST_SETTING)).contents
             state = pbs.Data[0]                  # 0=off 1=on 2=dimmed
             if state == 0:
-                STATE["burst_until"] = 0.0
-                STATE["force_pause"] = True
-                STATE["log"].append("display-off")
+                # 熄屏：只添加自己的暂停原因，不碰 lock/saver
+                block("display", True, "display-off")
             elif state == 1:
+                # 亮屏：只解除熄屏原因；若仍锁屏/屏保中，继续保持暂停
+                block("display", False)
                 trigger_burst(BURST, "display-on")
         except Exception:
             pass
     elif msg == WM_WTSSESSION_CHANGE:
         if wp in (WTS_SESSION_UNLOCK, WTS_CONSOLE_CONNECT):
-            # 回到桌面：播 burst 秒后自动定格
+            # 解锁/切回会话：只解除锁屏原因
+            block("lock", False)
             trigger_burst(BURST, "unlock" if wp == WTS_SESSION_UNLOCK else "console-connect")
         elif wp == WTS_SESSION_LOCK:
-            # 锁屏：黑屏界面后面不需要 4K 解码，定格省电。
-            # 之前只处理熄屏/屏保，锁屏后到熄屏前的几分钟里视频在黑屏后面白跑。
-            STATE["burst_until"] = 0.0
-            STATE["force_pause"] = True
-            STATE["log"].append("lock")
+            block("lock", True, "lock")
     return u.DefWindowProcW(hwnd, msg, wp, lp)
 
 
@@ -580,12 +598,17 @@ def ipc_get(prop, timeout=0.8):
 
 # ---------------------------------------------------------------- 单实例
 
+_MUTEX_HANDLE = None   # 必须持有句柄到进程退出，否则互斥体被 GC 关闭 = 单实例失效
+
+
 def acquire_single_instance():
+    global _MUTEX_HANDLE
     k32.CreateMutexW.restype = wintypes.HANDLE
     k32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
     h = k32.CreateMutexW(None, True, "Global\\AerialWallpaperPlayer")
     if not h or ctypes.get_last_error() == 183:
         return None
+    _MUTEX_HANDLE = h          # 持有，防止被 GC 关闭导致第二个实例能起来
     return h
 
 
@@ -688,7 +711,8 @@ def main():
     ctl_stop = k32.CreateEventW(None, False, False, EVT_STOP)
     ctl_play = k32.CreateEventW(None, False, False, EVT_PLAY)
     ctl_pause = k32.CreateEventW(None, False, False, EVT_PAUSE)
-    for h in (ctl_stop, ctl_play, ctl_pause):
+    ctl_saver_quit = k32.CreateEventW(None, False, False, EVT_SAVER_QUIT)
+    for h in (ctl_stop, ctl_play, ctl_pause, ctl_saver_quit):
         if h:
             k32.ResetEvent(h)
 
@@ -936,7 +960,7 @@ def main():
     write_status("start")
 
     while True:
-        # 等待：mpv 进程退出 / 面板「停止」/ 面板「立即动一下」/ 消息
+        # 等待：mpv 进程退出 / 面板「停止」/ 面板「立即动一下」/ 屏保退出 / 消息
         items = []
         if hproc:
             items.append(("proc", hproc))
@@ -946,6 +970,8 @@ def main():
             items.append(("play", ctl_play))
         if ctl_pause:
             items.append(("pause", ctl_pause))
+        if ctl_saver_quit:
+            items.append(("saver_quit", ctl_saver_quit))
         arr = (wintypes.HANDLE * max(1, len(items)))(*[h for _, h in items]) if items else None
         r = u.MsgWaitForMultipleObjects(len(items), arr, False, 200, QS_ALLINPUT)
         fired = items[r][0] if (arr is not None and 0 <= r < len(items)) else None
@@ -958,14 +984,21 @@ def main():
             shutdown("panel")
             return
         if fired == "play":
+            # 面板「立即动一下」：用户明确要看画面，解除屏保/熄屏/锁屏的全部暂停后播放
+            STATE["blockers"].clear()
             trigger_burst(BURST, "panel")
             write_status("panel")
         if fired == "pause":
-            # 屏幕保护程序启动：让壁纸静下来，屏保退出后由 EVT_PLAY 恢复
-            STATE["burst_until"] = 0.0
-            STATE["force_pause"] = True
+            # 屏保启动：只添加 saver 暂停原因，不碰熄屏/锁屏
+            block("saver", True)
             log("paused by screensaver")
             write_status("screensaver")
+        if fired == "saver_quit":
+            # 屏保退出：只解除 saver 原因。若此时屏幕已熄屏或已锁屏，继续保持暂停
+            block("saver", False)
+            if not STATE["blockers"]:
+                trigger_burst(BURST, "saver-quit")
+            write_status("saver-quit")
 
         now = time.time()
 
@@ -990,9 +1023,12 @@ def main():
             print(f"event: {STATE['log'][seen_log]}", flush=True)
             seen_log += 1
 
-        # 兜底触发：空闲很久后用户回来（= 亮屏/解锁/唤醒的实际表现）
+        # 兜底触发：只有「无人超过 idle_trig 秒后重新有输入」才算离开后回来。
+        # 原来的 20 秒太短，正常工作停顿一下就触发，造成工作中反复播放。
+        # 另外：若熄屏/锁屏/屏保仍有效，绝不靠这条路径恢复（那三类有各自的事件）。
         idle = idle_seconds()
-        if prev_idle is not None and prev_idle >= idle_trig and idle < 1.5:
+        if (prev_idle is not None and prev_idle >= idle_trig and idle < 1.5
+                and not STATE["blockers"]):
             trigger_burst(BURST, "user-return")
         prev_idle = idle
 
@@ -1009,8 +1045,10 @@ def main():
             next_refresh = now + refresh_min * 60
             trigger_burst(min(BURST, 6.0), "refresh")
 
-        # 暂停/恢复状态机：持续播放模式下只受熄屏约束，忽略 burst 到期
-        want_paused = STATE["force_pause"] or (not ALWAYS_PLAY and now >= STATE["burst_until"])
+        # 暂停/恢复状态机：
+        #   · 任一 blocker（熄屏/锁屏/屏保）有效 -> 必定暂停
+        #   · 否则：普通模式播满 burst 秒定格；「一直动」模式忽略到期
+        want_paused = bool(STATE["blockers"]) or (not ALWAYS_PLAY and now >= STATE["burst_until"])
         if want_paused != paused:
             if pipe is None:
                 pipe = ipc_connect(timeout=2)
