@@ -36,4 +36,5 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['C:/Users/Administrator/WorkBuddy/2026-10-29-18-39-59/aerial/assets/icon.ico'],
+    manifest='C:/Users/Administrator/WorkBuddy/2026-10-29-18-39-59/aerial/app.manifest',
 )

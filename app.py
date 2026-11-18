@@ -244,6 +244,38 @@ u.SendMessageW.restype = ctypes.c_ssize_t     # STM_SETIMAGE 返回旧 HBITMAP�
 g32.SetTextColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
 g32.SetBkMode.argtypes = [wintypes.HDC, ctypes.c_int]
 g32.SetBkColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
+g32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+g32.SelectObject.restype = wintypes.HGDIOBJ
+g32.GetStockObject.argtypes = [ctypes.c_int]
+g32.GetStockObject.restype = wintypes.HGDIOBJ
+g32.GetTextExtentPoint32W.argtypes = [wintypes.HDC, wintypes.LPCWSTR, ctypes.c_int,
+                                      ctypes.POINTER(wintypes.SIZE)]
+u.DrawTextW.argtypes = [wintypes.HDC, wintypes.LPCWSTR, ctypes.c_int,
+                        ctypes.POINTER(wintypes.RECT), wintypes.UINT]
+u.SetWindowLongPtrW.argtypes = [H, ctypes.c_int, ctypes.c_ssize_t]
+u.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+u.CallWindowProcW.argtypes = [ctypes.c_ssize_t, H, wintypes.UINT,
+                              wintypes.WPARAM, wintypes.LPARAM]
+u.CallWindowProcW.restype = ctypes.c_ssize_t
+
+
+class TRACKMOUSEEVENT(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("hwndTrack", H), ("dwHoverTime", wintypes.DWORD)]
+
+
+class DRAWITEMSTRUCT(ctypes.Structure):
+    _fields_ = [("CtlType", wintypes.UINT), ("CtlID", wintypes.UINT),
+                ("itemID", wintypes.UINT), ("itemAction", wintypes.UINT),
+                ("itemState", wintypes.UINT), ("hwndItem", H),
+                ("hDC", wintypes.HDC), ("rcItem", wintypes.RECT),
+                ("itemData", ctypes.c_size_t)]
+
+
+class MEASUREITEMSTRUCT(ctypes.Structure):
+    _fields_ = [("CtlType", wintypes.UINT), ("CtlID", wintypes.UINT),
+                ("itemID", wintypes.UINT), ("itemWidth", wintypes.UINT),
+                ("itemHeight", wintypes.UINT), ("itemData", ctypes.c_size_t)]
 # 64 位句柄安全：所有可能传入大句柄值的函数必须显式声明参数类型，
 # 否则 ctypes 默认按 c_int 传参，句柄高位不为 0 时抛 OverflowError
 u.ReleaseDC.restype = wintypes.BOOL
@@ -281,6 +313,11 @@ WM_TIMER = 0x0113
 WM_ERASEBKGND = 0x0014
 WM_CTLCOLORSTATIC = 0x0138
 WM_CTLCOLORBTN = 0x0135
+WM_CTLCOLOREDIT = 0x0133
+WM_DRAWITEM = 0x002B
+WM_MEASUREITEM = 0x002C
+WM_MOUSEMOVE = 0x0200
+WM_MOUSELEAVE = 0x02A3
 WM_CLOSE = 0x0010
 WM_DESTROY = 0x0002
 BM_GETCHECK = 0x00F0
@@ -290,22 +327,37 @@ WS_CHILD = 0x40000000
 WS_VISIBLE = 0x10000000
 WS_TABSTOP = 0x00010000
 WS_BORDER = 0x00800000
+WS_CLIPCHILDREN = 0x02000000
 BS_AUTOCHECKBOX = 0x00000003
+BS_OWNERDRAW = 0x0000000B
 ES_NUMBER = 0x00002000
 ES_AUTOHSCROLL = 0x00000080
 
-BG = 0x00F9F7F6          # COLORREF 00BBGGRR -> #f6f7f9
-FG = 0x00211E1C          # #1c1e21
-MUTED = 0x0080726B       # #6b7280
-ACCENT = 0x00ED6F2F      # #2f6fed
-GREEN = 0x0076660F       # #0f766e
-AMBER = 0x000953B4       # #b45309
+# ---- 浅色现代卡片风配色（COLORREF 00BBGGRR）----
+BG = 0x00F6F1EE          # 窗口背景 #EEF1F6
+CARD = 0x00FFFFFF        # 卡片白
+FG = 0x00241D1A          # 主文字 #1A1D24
+MUTED = 0x0094847A       # 次要文字 #7A8494
+ACCENT = 0x00ED6F2F      # 主蓝 #2F6FED
+ACCENT_HOVER = 0x00F0804A  # 悬停亮蓝 #4A80F0
+ACCENT_DOWN = 0x00D05F25   # 按下深蓝 #255FD0
+BORDER = 0x00EEE7E3      # 卡片描边 #E3E7EE
+GREEN = 0x006C9D0F       # 播放绿 #0F9D6C
+GREEN_BG = 0x00EEF6E5    # 胶囊浅绿底 #E5F6EE
+GRAY = 0x00A3938A        # 定格灰 #8A93A3
+GRAY_BG = 0x00F5F0ED     # 胶囊浅灰底 #EDF0F5
+AMBER = 0x000677D9       # 未运行琥珀 #D97706
+AMBER_BG = 0x00E3F1FD    # 胶囊浅琥珀底 #FDF1E3
+SEL_BG = 0x00FFEDE3      # 列表选中浅蓝 #E3EDFF
 
 UI = {"hwnd": None, "state": None, "sub": None, "vid": None,
       "color": FG, "state_color": FG, "auto": None, "burst": None,
       "always": None, "always_state": None, "preview": None, "liblist": None,
       "hinst": None, "f_title": None, "f_big": None, "f_norm": None, "f_small": None,
-      "bg_brush": None, "card_brush": None}
+      "bg_brush": None, "card_brush": None, "null_brush": None,
+      "scale": 1.0, "badge": ("未运行", "off"), "badge_sig": None,
+      "hover_btn": None, "btn_oldproc": {}, "muted": set(), "cards": [],
+      "ctrl_bg": {}}
 
 ID_PLAY, ID_SWITCH, ID_STOP, ID_START, ID_SAVE = 1001, 1002, 1003, 1004, 1005
 ID_AUTO, ID_BURST, ID_ALWAYS, ID_INSTALL = 1006, 1007, 1008, 1009
@@ -339,6 +391,19 @@ try:
     _gdip.GdipDrawImageRectI.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
                                          ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
     _gdip.GdipDeleteGraphics.argtypes = [ctypes.c_void_p]
+    # 圆角卡片 / 按钮 / 胶囊所需的 GDI+ 路径 API
+    _gdip.GdipCreateSolidFill.argtypes = [ctypes.c_int32, ctypes.POINTER(ctypes.c_void_p)]
+    _gdip.GdipDeleteBrush.argtypes = [ctypes.c_void_p]
+    _gdip.GdipCreatePath.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+    _gdip.GdipDeletePath.argtypes = [ctypes.c_void_p]
+    _gdip.GdipAddPathArc.argtypes = [ctypes.c_void_p] + [ctypes.c_float] * 6
+    _gdip.GdipClosePathFigure.argtypes = [ctypes.c_void_p]
+    _gdip.GdipFillPath.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    _gdip.GdipDrawPath.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    _gdip.GdipCreatePen1.argtypes = [ctypes.c_int32, ctypes.c_float, ctypes.c_int,
+                                     ctypes.POINTER(ctypes.c_void_p)]
+    _gdip.GdipDeletePen.argtypes = [ctypes.c_void_p]
+    _gdip.GdipSetSmoothingMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
     _gdi_token = ctypes.c_size_t()
     _gdi_in = _GdiPlusStartupInput()
     _gdi_in.GdiplusVersion = 1
@@ -365,6 +430,187 @@ def jpg_to_hbitmap(path):
     finally:
         if img.value:
             _gdip.GdipDisposeImage(img)
+
+
+def _argb(colorref):
+    """COLORREF(00BBGGRR) -> GDI+ ARGB 有符号 int32（不透明）"""
+    r = colorref & 0xFF
+    g = (colorref >> 8) & 0xFF
+    b = (colorref >> 16) & 0xFF
+    v = 0xFF000000 | (r << 16) | (g << 8) | b
+    return v - 0x100000000 if v >= 0x80000000 else v
+
+
+def round_rect(hdc, x, y, w, h, r, fill=None, line=None, line_w=1.0):
+    """GDI+ 抗锯齿圆角矩形。fill/line 为 COLORREF，None 表示不画"""
+    if not (_gdip and _gdip_ok):
+        if fill is not None:
+            br = g32.CreateSolidBrush(fill)
+            rc = wintypes.RECT(int(x), int(y), int(x + w), int(y + h))
+            u.FillRect(hdc, ctypes.byref(rc), br)
+            g32.DeleteObject(br)
+        return
+    gfx = ctypes.c_void_p()
+    if _gdip.GdipCreateFromHDC(hdc, ctypes.byref(gfx)) != 0 or not gfx.value:
+        return
+    path = ctypes.c_void_p()
+    try:
+        _gdip.GdipSetSmoothingMode(gfx, 4)          # SmoothingModeAntiAlias
+        r = max(1.0, min(float(r), w / 2.0, h / 2.0))
+        d = 2.0 * r
+        if _gdip.GdipCreatePath(0, ctypes.byref(path)) != 0 or not path.value:
+            return
+        _gdip.GdipAddPathArc(path, x, y, d, d, 180, 90)
+        _gdip.GdipAddPathArc(path, x + w - d, y, d, d, 270, 90)
+        _gdip.GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0, 90)
+        _gdip.GdipAddPathArc(path, x, y + h - d, d, d, 90, 90)
+        _gdip.GdipClosePathFigure(path)
+        if fill is not None:
+            br = ctypes.c_void_p()
+            if _gdip.GdipCreateSolidFill(_argb(fill), ctypes.byref(br)) == 0:
+                _gdip.GdipFillPath(gfx, br, path)
+                _gdip.GdipDeleteBrush(br)
+        if line is not None:
+            pen = ctypes.c_void_p()
+            if _gdip.GdipCreatePen1(_argb(line), float(line_w), 2, ctypes.byref(pen)) == 0:
+                _gdip.GdipDrawPath(gfx, pen, path)
+                _gdip.GdipDeletePen(pen)
+    except Exception:
+        pass
+    finally:
+        if path.value:
+            _gdip.GdipDeletePath(path)
+        _gdip.GdipDeleteGraphics(gfx)
+
+
+def draw_text(hdc, text, x, y, w, h, color, font, center=False):
+    """单行文字，垂直居中；center=True 时水平居中"""
+    g32.SetBkMode(hdc, 1)                            # TRANSPARENT(1)，2=OPAQUE 会产生白字白底块
+    g32.SetTextColor(hdc, color)
+    old = g32.SelectObject(hdc, font)
+    rc = wintypes.RECT(int(x), int(y), int(x + w), int(y + h))
+    u.DrawTextW(hdc, text, -1, ctypes.byref(rc),
+                0x0020 | 0x0004 | (0x0001 if center else 0))   # SINGLELINE|VCENTER
+    g32.SelectObject(hdc, old)
+
+
+def text_width(hdc, text, font):
+    old = g32.SelectObject(hdc, font)
+    sz = wintypes.SIZE()
+    g32.GetTextExtentPoint32W(hdc, text, len(text), ctypes.byref(sz))
+    g32.SelectObject(hdc, old)
+    return sz.cx
+
+
+BADGE_STYLE = {           # kind -> (点/文字颜色, 底色)
+    "play": (GREEN, GREEN_BG),
+    "pause": (GRAY, GRAY_BG),
+    "off": (AMBER, AMBER_BG),
+    "starting": (GRAY, GRAY_BG),
+}
+
+
+def draw_badge(hdc):
+    """右上角状态胶囊：圆点 + 文字，浅底色药丸"""
+    if not UI.get("badge_x") or not UI.get("f_norm"):
+        return                      # 窗口创建早期、布局未完成时不画
+    text, kind = UI.get("badge", ("未运行", "off"))
+    dot, bgc = BADGE_STYLE.get(kind, BADGE_STYLE["off"])
+    S = UI["scale"]
+    f = UI["f_norm"]
+    tw = text_width(hdc, text, f)
+    w = int(tw + 46 * S)
+    h = int(30 * S)
+    x = UI["badge_x"] - w
+    y = int(26 * S)
+    UI["badge_rect"] = (x - 4, y - 4, w + 8, h + 8)
+    round_rect(hdc, x, y, w, h, h / 2.0, fill=bgc)
+    # 圆点
+    dr = int(4 * S)
+    dx = x + int(14 * S)
+    dy = y + (h - 2 * dr) // 2
+    round_rect(hdc, dx, dy, 2 * dr, 2 * dr, dr, fill=dot)
+    draw_text(hdc, text, dx + 2 * dr + int(7 * S), y, tw + 8, h, dot, f)
+
+
+def draw_button(dis):
+    """owner-draw 按钮：主按钮实心蓝、次按钮白底描边，含悬停/按下态"""
+    cid = dis.CtlID
+    S = UI["scale"]
+    rc = dis.rcItem
+    x, y, w, h = rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top
+    pressed = bool(dis.itemState & 0x0008)           # ODS_SELECTED
+    hovered = UI.get("hover_btn") == dis.hwndItem
+    primary = cid in (1001, 1011)                    # 立即动一下 / 使用此视频
+    n = u.GetWindowTextLengthW(dis.hwndItem) + 1
+    buf = ctypes.create_unicode_buffer(n)
+    u.GetWindowTextW(dis.hwndItem, buf, n)
+    if primary:
+        fill = ACCENT_DOWN if pressed else (ACCENT_HOVER if hovered else ACCENT)
+        fg = 0x00FFFFFF
+        round_rect(dis.hDC, x, y, w, h, 8 * S, fill=fill)
+    else:
+        fill = 0x00FBF6F3 if hovered else CARD       # hover #F3F6FB
+        round_rect(dis.hDC, x, y, w, h, 8 * S, fill=fill, line=BORDER)
+        fg = FG
+    draw_text(dis.hDC, buf.value, x, y - 1, w, h, fg, UI["f_norm"], center=True)
+
+
+def draw_list_item(dis):
+    """视频库行：白底，选中行浅蓝圆角，文字垂直居中"""
+    if dis.itemID == 0xFFFFFFFF:
+        return
+    S = UI["scale"]
+    rc = dis.rcItem
+    x, y, w, h = rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top
+    br = g32.CreateSolidBrush(CARD)
+    u.FillRect(dis.hDC, ctypes.byref(rc), br)
+    g32.DeleteObject(br)
+    selected = bool(dis.itemState & 0x0001)          # ODS_SELECTED
+    if selected:
+        round_rect(dis.hDC, x + 4, y + 2, w - 8, h - 4, 6 * S, fill=SEL_BG)
+    # LBS_HASSTRINGS 下列表文字由控件持有，itemData 恒为 0；必须用 LB_GETTEXT 取回
+    txt = ""
+    try:
+        n = u.SendMessageW(dis.hwndItem, 0x018A, dis.itemID, 0)     # LB_GETTEXTLEN
+        if 0 < n < 4096:
+            buf = ctypes.create_unicode_buffer(n + 1)
+            u.SendMessageW(dis.hwndItem, 0x0189, dis.itemID,        # LB_GETTEXT
+                           wintypes.LPARAM(ctypes.addressof(buf)))
+            txt = buf.value
+    except Exception:
+        txt = ""
+    color = ACCENT if selected else FG
+    draw_text(dis.hDC, txt, x + int(16 * S), y, w - int(28 * S), h, color, UI["f_norm"])
+
+
+def _btn_wndproc(hwnd, msg, wp, lp):
+    """按钮子类化：追踪悬停（owner-draw 按钮的 hover 效果）"""
+    if msg == WM_MOUSEMOVE:
+        if UI.get("hover_btn") != hwnd:
+            UI["hover_btn"] = hwnd
+            tme = TRACKMOUSEEVENT(ctypes.sizeof(TRACKMOUSEEVENT), 0x0002, hwnd, 0)  # TME_LEAVE
+            u.TrackMouseEvent(ctypes.byref(tme))
+        u.InvalidateRect(hwnd, None, False)
+        return 0
+    if msg == WM_MOUSELEAVE:
+        if UI.get("hover_btn") == hwnd:
+            UI["hover_btn"] = None
+        u.InvalidateRect(hwnd, None, False)
+        return 0
+    old = UI["btn_oldproc"].get(hwnd)
+    if old:
+        return u.CallWindowProcW(old, hwnd, msg, wp, lp)
+    return u.DefWindowProcW(hwnd, msg, wp, lp)
+
+
+_BTN_PROC = WNDPROC(_btn_wndproc)     # 保持回调引用，防 GC
+
+
+def make_ownerdraw_button(b):
+    """把按钮切到自绘 + 子类化以支持悬停"""
+    old = u.SetWindowLongPtrW(b, -4, ctypes.cast(_BTN_PROC, ctypes.c_void_p).value)  # GWLP_WNDPROC
+    UI["btn_oldproc"][b] = old
 
 
 def _font(px, bold=False):
@@ -442,13 +688,11 @@ def draw_preview(hdc):
     if not rect or not (_gdip and _gdip_ok):
         return
     x, y, w, h = rect
-    # 白色底 + 边框
-    br = g32.CreateSolidBrush(0x00FFFFFF)
-    rc = wintypes.RECT(x, y, x + w, y + h)
-    u.FillRect(hdc, ctypes.byref(rc), br)
-    g32.DeleteObject(br)
+    # 圆角白底卡片 + 描边
+    round_rect(hdc, x, y, w, h, 12 * UI["scale"], fill=CARD, line=BORDER)
     path = LIB.get("preview_path")
     if not path or not os.path.exists(path):
+        draw_text(hdc, "无缩略图", x, y, w, h, MUTED, UI["f_small"], center=True)
         return
     img = ctypes.c_void_p()
     if _gdip.GdipLoadImageFromFile(path, ctypes.byref(img)) != 0 or not img.value:
@@ -456,8 +700,10 @@ def draw_preview(hdc):
     gfx = ctypes.c_void_p()
     try:
         if _gdip.GdipCreateFromHDC(hdc, ctypes.byref(gfx)) == 0 and gfx.value:
-            # 等比缩放居中
-            _gdip.GdipDrawImageRectI(gfx, img, x + 4, y + 4, w - 8, h - 8)
+            # 等比缩放居中（缩略图固定 320x180）
+            sc = min((w - 12) / 320.0, (h - 12) / 180.0)
+            dw, dh = int(320 * sc), int(180 * sc)
+            _gdip.GdipDrawImageRectI(gfx, img, x + (w - dw) // 2, y + (h - dh) // 2, dw, dh)
             _gdip.GdipDeleteGraphics(gfx)
     except Exception:
         pass
@@ -482,31 +728,36 @@ def apply_library_video(index):
 
 
 def refresh_ui():
-    """WM_TIMER：刷新状态显示"""
+    """WM_TIMER：刷新状态胶囊、当前视频、按钮文字"""
     running = is_running()
     st = read_status()
     cfg = load_cfg()
+    try:
+        burst = int(float(cfg.get("burst_seconds", 8)))
+    except Exception:
+        burst = 8
     if running and st:
         if st.get("paused"):
-            UI["color"] = GREEN
-            txt = "状态：已冻结（定格最后一帧）"
+            badge = ("已定格", "pause")
             age = int(time.time() - float(st.get("ts", time.time())))
-            sub = (f"静止 {age} 秒 · 开销≈0 · 回到桌面（亮屏/解锁/屏保退出）自动播放 "
-                   f"{int(float(cfg.get('burst_seconds', 8)))} 秒")
+            sub = f"静止 {age} 秒 · 开销≈0 · 回到桌面自动播放 {burst} 秒"
         else:
-            UI["color"] = ACCENT
-            txt = "状态：正在播放"
+            badge = ("正在播放", "play")
             if cfg.get("always_play"):
-                sub = "持续播放已开启：锁屏/熄屏/屏保时暂停，回到桌面自动恢复"
+                sub = "持续播放已开启 · 锁屏/熄屏/屏保时暂停，回到桌面自动恢复"
             else:
-                sub = "播放中（解码约 40% GPU），结束后自动冻结"
+                sub = f"播放中 · {burst} 秒后自动定格"
     elif running:
-        UI["color"] = MUTED
-        txt, sub = "状态：启动中…", ""
+        badge, sub = ("启动中", "starting"), "正在接管桌面…"
     else:
-        UI["color"] = AMBER
-        txt, sub = "状态：未运行", "点「启动壁纸」开始"
-    u.SetWindowTextW(UI["state"], txt)
+        badge, sub = ("未运行", "off"), "点「启动壁纸」开始，或双击右侧视频库"
+    if UI.get("badge") != badge:
+        UI["badge"] = badge
+        if UI.get("hwnd") and UI.get("badge_x"):
+            S = UI["scale"]
+            rc = wintypes.RECT(UI["badge_x"] - int(250 * S), int(16 * S),
+                               UI["badge_x"] + 8, int(68 * S))
+            u.InvalidateRect(UI["hwnd"], ctypes.byref(rc), True)
     # 智能切换按钮：文字跟随运行状态（每秒刷新，无抖动）
     if UI.get("toggle"):
         u.SetWindowTextW(UI["toggle"], "停止壁纸" if running else "启动壁纸")
@@ -515,8 +766,8 @@ def refresh_ui():
         sub = fl[0]
     u.SetWindowTextW(UI["sub"], sub)
     v = current_video()
-    u.SetWindowTextW(UI["vid"], ("当前视频：" + os.path.basename(v)) if v
-                     else "当前视频：未设置（双击右侧视频库选择）")
+    u.SetWindowTextW(UI["vid"], os.path.basename(v) if v
+                     else "未设置（双击右侧视频库选择）")
     # 复选框跟随配置（面板改完立刻写盘，所以这里不会抖动）
     if UI.get("always"):
         on = bool(cfg.get("always_play"))
@@ -613,23 +864,54 @@ def ui_wndproc(hwnd, msg, wp, lp):
             idx = u.SendMessageW(UI["liblist"], 0x0188, 0, 0)
             if idx >= 0:
                 apply_library_video(idx)
-        u.InvalidateRect(UI["state"], None, True)
         refresh_ui()
         return 0
     if msg == WM_TIMER:
         refresh_ui()
         return 0
+    if msg == WM_MEASUREITEM:
+        mis = ctypes.cast(lp, ctypes.POINTER(MEASUREITEMSTRUCT)).contents
+        if mis.CtlType == 2:                       # ODT_LISTBOX
+            mis.itemHeight = int(30 * UI["scale"])
+            return 1
+        return 0
+    if msg == WM_DRAWITEM:
+        dis = ctypes.cast(lp, ctypes.POINTER(DRAWITEMSTRUCT)).contents
+        if dis.CtlType == 4:                       # ODT_BUTTON
+            draw_button(dis)
+            return 1
+        if dis.CtlType == 2:                       # ODT_LISTBOX
+            draw_list_item(dis)
+            return 1
+        return 0
     if msg == WM_CTLCOLORSTATIC:
-        hdc = wintypes.HDC(lp)
-        g32.SetBkMode(hdc, 2)  # TRANSPARENT
-        g32.SetTextColor(hdc, UI["color"] if lp == UI["state"] else FG)
-        g32.SetBkColor(hdc, BG)
-        return UI["bg_brush"]
+        # 不透明方案：文字背景 = 所在卡片颜色，避免透明文字的残影问题
+        hdc = wintypes.HDC(wp)
+        bgc = UI["ctrl_bg"].get(lp, BG)
+        g32.SetBkMode(hdc, 2)                      # OPAQUE
+        g32.SetBkColor(hdc, bgc)
+        g32.SetTextColor(hdc, MUTED if lp in UI["muted"] else FG)
+        return UI["card_brush"] if bgc == CARD else UI["bg_brush"]
+    if msg == WM_CTLCOLORBTN:
+        # 复选框：文字背景用卡片白
+        hdc = wintypes.HDC(wp)
+        g32.SetBkMode(hdc, 2)
+        g32.SetBkColor(hdc, CARD)
+        g32.SetTextColor(hdc, FG)
+        return UI["card_brush"]
+    if msg == WM_CTLCOLOREDIT:
+        hdc = wintypes.HDC(wp)
+        g32.SetBkColor(hdc, CARD)
+        g32.SetTextColor(hdc, FG)
+        return UI["card_brush"]
     if msg == WM_ERASEBKGND:
         rect = wintypes.RECT()
         u.GetClientRect(hwnd, ctypes.byref(rect))
         hdc = wintypes.HDC(wp)
         u.FillRect(hdc, ctypes.byref(rect), UI["bg_brush"])
+        for (cx, cy, cw, ch) in UI["cards"]:
+            round_rect(hdc, cx, cy, cw, ch, 12 * UI["scale"], fill=CARD, line=BORDER)
+        draw_badge(hdc)
         draw_preview(hdc)      # 视频库缩略图直接画在预览区
         return 1
     if msg == WM_CLOSE:
@@ -683,11 +965,11 @@ def run_ui():
     wc.lpszClassName = "AerialWallpaperUI"
     u.RegisterClassW(ctypes.byref(wc))
 
-    # 左侧控制区 470 + 右侧视频库 400
-    W, Ht = int(886 * S), int(600 * S)
+    # 左侧控制区 452 + 右侧视频库 436
+    W, Ht = int(960 * S), int(644 * S)
     sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
     hwnd = u.CreateWindowExW(0, "AerialWallpaperUI", "动态壁纸 · 控制面板",
-                             0x00CF0000 | 0x00020000,   # OVERLAPPEDWINDOW | WS_MINIMIZEBOX
+                             0x00CF0000 | 0x00020000 | WS_CLIPCHILDREN,
                              (sw - W) // 2, (sh - Ht) // 2, W, Ht,
                              None, None, hinst, None)
     if not hwnd:
@@ -697,104 +979,93 @@ def run_ui():
     u.SetForegroundWindow(hwnd)
     u.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)   # TOPMOST|NOMOVE|NOSIZE 确保不被遮挡
     UI["bg_brush"] = g32.CreateSolidBrush(BG)
+    UI["card_brush"] = g32.CreateSolidBrush(CARD)
+    UI["scale"] = S
 
-    f_title = _font(15 * S, True); f_big = _font(12 * S, True)
+    f_title = _font(22 * S, True); f_big = _font(13 * S, True)
     f_norm = _font(11 * S); f_small = _font(10 * S)
     UI["f_title"], UI["f_big"], UI["f_norm"], UI["f_small"] = f_title, f_big, f_norm, f_small
 
-    M = int(18 * S)
-    y = M
+    def static(text, x, y, w, h, font=None, muted=False, card=False):
+        c = _ctrl(hwnd, "STATIC", text, 0, x, y, w, h)
+        _setfont(c, font or f_norm)
+        if muted:
+            UI["muted"].add(c)
+        if card:
+            UI["ctrl_bg"][c] = CARD
+        return c
 
-    t1 = _ctrl(hwnd, "STATIC", "动态壁纸", WS_CHILD | WS_VISIBLE, M, y, 300 * S, 24 * S)
-    _setfont(t1, f_title); y += 28 * S
-    t2 = _ctrl(hwnd, "STATIC", "回到桌面（亮屏/解锁/屏保退出）播放几秒，其余时间定格——几乎零开销",
-               WS_CHILD | WS_VISIBLE, M, y, 430 * S, 18 * S)
-    _setfont(t2, f_small); y += 26 * S
-
-    UI["state"] = _ctrl(hwnd, "STATIC", "状态：读取中…", WS_CHILD | WS_VISIBLE, M, y, 430 * S, 22 * S)
-    _setfont(UI["state"], f_big); y += 26 * S
-    UI["sub"] = _ctrl(hwnd, "STATIC", "", WS_CHILD | WS_VISIBLE, M, y, 430 * S, 17 * S)
-    _setfont(UI["sub"], f_small); y += 20 * S
-    UI["vid"] = _ctrl(hwnd, "STATIC", "", WS_CHILD | WS_VISIBLE, M, y, 430 * S, 30 * S)
-    _setfont(UI["vid"], f_small); y += 34 * S
-
-    bw = (430 * S - 12 * S) / 2
-    # 「停止壁纸」是智能切换按钮：运行中显示"停止壁纸"，已停止显示"启动壁纸"
-    defs = [("立即动一下", ID_PLAY), ("停止壁纸", ID_STOP), ("安装屏保", ID_INSTALL)]
-    rows = (len(defs) + 1) // 2
-    for i, (txt, cid) in enumerate(defs):
-        b = _ctrl(hwnd, "BUTTON", txt, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                  M + (i % 2) * (bw + 12 * S), y + (i // 2) * (34 * S + 6 * S), bw, 32 * S, cid)
+    def button(text, cid, x, y, w, h):
+        b = _ctrl(hwnd, "BUTTON", text, WS_TABSTOP | BS_OWNERDRAW, x, y, w, h, cid)
         _setfont(b, f_norm)
-        if cid == ID_STOP:
-            UI["toggle"] = b
-    y += rows * (34 * S + 6 * S) + 6 * S
+        make_ownerdraw_button(b)
+        return b
 
-    UI["auto"] = _ctrl(hwnd, "BUTTON", "开机自动运行",
-                       WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-                       M, y, 200 * S, 22 * S, ID_AUTO)
+    def card(x, y, w, h):
+        UI["cards"].append((int(x), int(y), int(w), int(h)))
+
+    M = 24 * S
+    LW = 452 * S
+
+    # ---------------- 顶部：标题 + 状态胶囊（胶囊自绘于右上） ----------------
+    static("动态壁纸", M, 20 * S, 400 * S, 34 * S, f_title)
+    static("回到桌面自动播放几秒，其余时间定格 · 几乎零开销",
+           M, 58 * S, 440 * S, 18 * S, f_small, muted=True)
+    UI["badge_x"] = int(960 * S - M)
+
+    # ---------------- 卡片 A：当前壁纸 ----------------
+    card(M, 92 * S, LW, 96 * S)
+    static("当前壁纸", M + 18 * S, 105 * S, LW - 36 * S, 16 * S, f_small, muted=True, card=True)
+    UI["vid"] = static("", M + 18 * S, 124 * S, LW - 36 * S, 24 * S, f_big, card=True)
+    UI["sub"] = static("", M + 18 * S, 154 * S, LW - 36 * S, 18 * S, f_small, muted=True, card=True)
+
+    # ---------------- 卡片 B：快捷操作 ----------------
+    card(M, 200 * S, LW, 118 * S)
+    button("立即动一下", ID_PLAY, M + 16 * S, 216 * S, LW - 32 * S, 36 * S)
+    bw2 = (LW - 42 * S) / 2
+    UI["toggle"] = button("停止壁纸", ID_STOP, M + 16 * S, 262 * S, bw2, 32 * S)
+    button("安装屏保", ID_INSTALL, M + 26 * S + bw2, 262 * S, bw2, 32 * S)
+
+    # ---------------- 卡片 C：播放设置 ----------------
+    card(M, 330 * S, LW, 130 * S)
+    UI["auto"] = _ctrl(hwnd, "BUTTON", "开机自动运行", BS_AUTOCHECKBOX | WS_TABSTOP,
+                       M + 16 * S, 344 * S, 180 * S, 24 * S, ID_AUTO)
     _setfont(UI["auto"], f_norm)
-    # 自启状态要问计划任务（PowerShell 约 1s），放到窗口显示后再查，
-    # 否则界面会"半成品且不响应点击"约 1 秒
-    UI["auto_state"] = _ctrl(hwnd, "STATIC", "自启：检查中…",
-                             WS_CHILD | WS_VISIBLE, M + 210 * S, y + 3 * S, 200 * S, 18 * S)
-    _setfont(UI["auto_state"], f_small)
-    y += 32 * S
-
-    UI["always"] = _ctrl(hwnd, "BUTTON", "让壁纸一直动",
-                         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP,
-                         M, y, 200 * S, 22 * S, ID_ALWAYS)
+    UI["auto_state"] = static("自启：检查中…", M + 210 * S, 348 * S, 210 * S, 18 * S,
+                              f_small, muted=True, card=True)
+    UI["always"] = _ctrl(hwnd, "BUTTON", "让壁纸一直动", BS_AUTOCHECKBOX | WS_TABSTOP,
+                         M + 16 * S, 376 * S, 180 * S, 24 * S, ID_ALWAYS)
     _setfont(UI["always"], f_norm)
-    UI["always_state"] = _ctrl(hwnd, "STATIC", "持续播放：未开启",
-                               WS_CHILD | WS_VISIBLE, M + 210 * S, y + 3 * S, 220 * S, 18 * S)
-    _setfont(UI["always_state"], f_small)
-    y += 32 * S
-
-    lbl = _ctrl(hwnd, "STATIC", "回到桌面后播放（秒，3–30）", WS_CHILD | WS_VISIBLE, M, y + 3 * S,
-                150 * S, 18 * S)
-    _setfont(lbl, f_norm)
+    UI["always_state"] = static("持续播放：未开启", M + 210 * S, 380 * S, 220 * S, 18 * S,
+                                f_small, muted=True, card=True)
+    static("回到桌面后播放（秒，3–30）", M + 18 * S, 416 * S, 205 * S, 20 * S, f_norm, card=True)
     UI["burst"] = _ctrl(hwnd, "EDIT", str(int(float(load_cfg().get("burst_seconds", 8)))),
-                        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP,
-                        M + 155 * S, y, 44 * S, 24 * S, ID_BURST)
+                        WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP,
+                        M + 232 * S, 412 * S, 48 * S, 26 * S, ID_BURST)
     _setfont(UI["burst"], f_norm)
-    bs = _ctrl(hwnd, "BUTTON", "保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-               M + 210 * S, y, 60 * S, 26 * S, ID_SAVE)
-    _setfont(bs, f_norm)
-    y += 38 * S
+    button("保存", ID_SAVE, M + 292 * S, 412 * S, 64 * S, 28 * S)
 
-    foot = _ctrl(hwnd, "STATIC", f"目录：{APP_DIR}", WS_CHILD | WS_VISIBLE, M, y, 430 * S, 30 * S)
-    _setfont(foot, f_small)
+    static(f"目录：{APP_DIR}", M, 474 * S, LW, 30 * S, f_small, muted=True)
 
     # ---------------- 右侧：视频库列表 + 缩略预览 ----------------
-    RX = int(482 * S)            # 右栏起点
-    RW = int(386 * S)            # 右栏宽度
-    sep = u.CreateWindowExW(0, "STATIC", None, WS_CHILD | WS_VISIBLE | 0x0001,  # SS_ETCHEDVERT
-                            RX - int(8 * S), M, 2, Ht - 2 * M, None, None, hinst, None)
-    lib_title = _ctrl(hwnd, "STATIC", "视频库（点击预览 · 双击设为壁纸）",
-                      WS_CHILD | WS_VISIBLE, RX, M, RW, int(22 * S))
-    _setfont(lib_title, f_big)
-    ry = M + int(28 * S)
+    RX = 500 * S
+    RW = 436 * S
+    # 标题宽度收窄，给右上角状态胶囊让位（STATIC 不透明背景会盖住父窗口自绘的徽章）
+    head_w = RW - 150 * S
+    static("视频库", RX, 24 * S, head_w, 24 * S, f_big)
+    static("点击预览 · 双击设为壁纸", RX, 52 * S, head_w, 18 * S, f_small, muted=True)
 
-    # ListBox：LBS_NOTIFY(1) | LBS_HASSTRINGS(64) | WS_VSCROLL(0x200000) | WS_BORDER
+    # ListBox：LBS_NOTIFY(1)|LBS_HASSTRINGS(0x40)|LBS_OWNERDRAWFIXED(0x10)
+    #          |LBS_NOINTEGRALHEIGHT(0x100)|WS_VSCROLL(0x200000)
     UI["liblist"] = u.CreateWindowExW(
         0, "ListBox", None,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_BORDER | 0x0001 | 0x0040 | 0x00200000,
-        RX, ry, RW, int(300 * S), hwnd, ID_LIBLIST, hinst, None)
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x00200000 | 0x0001 | 0x0040 | 0x0010 | 0x0100,
+        int(RX), int(92 * S), int(RW), int(280 * S), hwnd, ID_LIBLIST, hinst, None)
     _setfont(UI["liblist"], f_norm)
-    ry += int(306 * S)
 
-    pv_label = _ctrl(hwnd, "STATIC", "预览", WS_CHILD | WS_VISIBLE, RX, ry, RW, int(18 * S))
-    _setfont(pv_label, f_small)
-    ry += int(20 * S)
-
-    # 预览区：不再用 Static SS_BITMAP（跨进程/64 位句柄不可靠），
-    # 直接在主窗口 WM_PAINT 中绘 JPG；这里只记坐标。
-    LIB["preview_rect"] = (RX, ry, RW, int(180 * S))
-    ry += int(188 * S)
-
-    use = _ctrl(hwnd, "BUTTON", "使用此视频", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                RX, ry, int(RW / 2 - 4 * S), int(32 * S), ID_LIBUSE)
-    _setfont(use, f_norm)
+    # 预览区：圆角白底卡片，GDI+ 直接绘 JPG（见 draw_preview）
+    LIB["preview_rect"] = (int(RX), int(384 * S), int(RW), int(160 * S))
+    button("使用此视频", ID_LIBUSE, RX, 556 * S, RW, 34 * S)
 
     # 填充列表：扫描视频目录，选中当前正在用的那条
     items = scan_library()

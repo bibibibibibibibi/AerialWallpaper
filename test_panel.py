@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """面板按钮端到端测试：向真实面板窗口的控件发送 BM_CLICK，验证实际效果"""
-import ctypes, json, os, subprocess, sys, time
+import ctypes, json, os, subprocess, sys, time, winreg
 from ctypes import wintypes
 
 BASE = os.path.dirname(os.path.abspath(__file__))
