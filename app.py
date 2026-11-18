@@ -387,7 +387,8 @@ SEL_BG = 0x00FEF0E8      # 列表选中浅蓝 #E8F0FE
 TITLE_BG = 0x00FCFDFE    # 自绘标题栏底 #FCFDFE
 HOVER_BG = 0x00F2F5F9    # 控件悬停浅灰 #F5F7F2
 INPUT_BG = 0x00F7F8FA    # 输入框浅灰底 #FAF8F7
-CHECK_BG = 0x00E9EDF2    # 未选中复选框底 #F2EDE9
+BTN_BORDER = 0x00C9D0D8    # 次按钮描边 #D0D0C9（清晰可见）
+CHECK_BG = 0x00E9EDF2      # 未选中复选框底 #F2EDE9
 
 UI = {"hwnd": None, "state": None, "sub": None, "vid": None,
       "color": FG, "state_color": FG, "auto": None, "burst": None,
@@ -445,6 +446,7 @@ try:
                                      ctypes.POINTER(ctypes.c_void_p)]
     _gdip.GdipDeletePen.argtypes = [ctypes.c_void_p]
     _gdip.GdipSetSmoothingMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    _gdip.GdipSetClipPath.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
     _gdi_token = ctypes.c_size_t()
     _gdi_in = _GdiPlusStartupInput()
     _gdi_in.GdiplusVersion = 1
@@ -677,10 +679,13 @@ def draw_button(dis):
     if primary:
         fill = ACCENT_DOWN if pressed else (ACCENT_HOVER if hovered else ACCENT)
         fg = 0x00FFFFFF
-        round_rect(dis.hDC, x, y, w, h, 8 * S, fill=fill)
+        round_rect(dis.hDC, x, y, w, h, 8 * S, fill=fill,
+                   line=(ACCENT_DOWN if not pressed else None), line_w=1.0)
     else:
-        fill = 0x00FBF6F3 if hovered else CARD       # hover #F3F6FB
-        round_rect(dis.hDC, x, y, w, h, 8 * S, fill=fill, line=BORDER)
+        # 次按钮：浅灰实底 + 清晰的描边，从白色卡片上明确浮出
+        fill = HOVER_BG if hovered else INPUT_BG
+        edge = ACCENT if hovered else BTN_BORDER
+        round_rect(dis.hDC, x, y, w, h, 8 * S, fill=fill, line=edge, line_w=1.2)
         fg = FG
     draw_text(dis.hDC, buf.value, x, y - 1, w, h, fg, UI["f_norm"], center=True)
 
@@ -847,16 +852,33 @@ def draw_preview(hdc):
     if _gdip.GdipLoadImageFromFile(path, ctypes.byref(img)) != 0 or not img.value:
         return
     gfx = ctypes.c_void_p()
+    clip = ctypes.c_void_p()
+    S = UI["scale"]
     try:
-        if _gdip.GdipCreateFromHDC(hdc, ctypes.byref(gfx)) == 0 and gfx.value:
-            # 等比缩放居中（缩略图固定 320x180）
-            sc = min((w - 12) / 320.0, (h - 12) / 180.0)
-            dw, dh = int(320 * sc), int(180 * sc)
-            _gdip.GdipDrawImageRectI(gfx, img, x + (w - dw) // 2, y + (h - dh) // 2, dw, dh)
-            _gdip.GdipDeleteGraphics(gfx)
+        if _gdip.GdipCreateFromHDC(hdc, ctypes.byref(gfx)) != 0 or not gfx.value:
+            return
+        # 圆角裁剪路径：图片严格贴合圆角卡片内缘
+        if _gdip.GdipCreatePath(0, ctypes.byref(clip)) == 0 and clip.value:
+            r = 10 * S
+            d = 2 * r
+            ax, ay, aw, ah = float(x + 1), float(y + 1), float(w - 2), float(h - 2)
+            _gdip.GdipAddPathArc(clip, ax, ay, d, d, 180, 90)
+            _gdip.GdipAddPathArc(clip, ax + aw - d, ay, d, d, 270, 90)
+            _gdip.GdipAddPathArc(clip, ax + aw - d, ay + ah - d, d, d, 0, 90)
+            _gdip.GdipAddPathArc(clip, ax, ay + ah - d, d, d, 90, 90)
+            _gdip.GdipClosePathFigure(clip)
+            _gdip.GdipSetClipPath(gfx, clip, 0)     # CombineModeReplace
+        # cover 模式：按较大比例铺满，居中（缩略图固定 320x180）
+        sc = max(w / 320.0, h / 180.0)
+        dw, dh = int(320 * sc) + 1, int(180 * sc) + 1
+        _gdip.GdipDrawImageRectI(gfx, img, int(x + (w - dw) / 2), int(y + (h - dh) / 2), dw, dh)
     except Exception:
         pass
     finally:
+        if clip.value:
+            _gdip.GdipDeletePath(clip)
+        if gfx.value:
+            _gdip.GdipDeleteGraphics(gfx)
         _gdip.GdipDisposeImage(img)
 
 
@@ -945,32 +967,44 @@ def auto_toggle_async(enable):
     threading.Thread(target=work, daemon=True).start()
 
 
+def _pt_from_lparam(lp):
+    """从鼠标消息 lParam 提取客户区坐标（低16位x，高16位y，均为有符号）"""
+    try:
+        v = int(lp)
+    except Exception:
+        return None, None
+    x = v & 0xFFFF
+    y = (v >> 16) & 0xFFFF
+    if x & 0x8000: x -= 0x10000
+    if y & 0x8000: y -= 0x10000
+    return x, y
+
+
+def _hit_titlebtn(x, y):
+    """判断客户区坐标是否落在自绘标题栏按钮上"""
+    if x is None:
+        return None
+    for bid, bx, by, bw, bh in UI["title_btns"]:
+        if bx <= x < bx + bw and by <= y < by + bh:
+            return bid
+    return None
+
+
 def ui_wndproc(hwnd, msg, wp, lp):
     if msg == WM_NCHITTEST:
-        # 自绘标题栏区域：交给 DefWindowProc 判断；窗口按钮由客户区鼠标消息处理
+        # lp 为屏幕坐标；转客户区后判断标题栏
         pt = wintypes.POINT()
-        v = (lp & 0xFFFF) if isinstance(lp, int) else 0
-        w = (lp >> 16) & 0xFFFF if isinstance(lp, int) else 0
-        pt.x = v - 0x10000 if v & 0x8000 else v
-        pt.y = w - 0x10000 if w & 0x8000 else w
+        sx, sy = _pt_from_lparam(lp)
+        pt.x, pt.y = sx or 0, sy or 0
         u.ScreenToClient(hwnd, ctypes.byref(pt))
         if 0 <= pt.y < int(TITLE_H * UI["scale"]):
-            # 标题栏右侧按钮区域返回 HTCLIENT，让点击可被客户区消息捕获
-            for bid, bx, by, bw, bh in UI["title_btns"]:
-                if bx <= pt.x < bx + bw and by <= pt.y < by + bh:
-                    return HTCLIENT
-            return HTCAPTION           # 其余标题栏可拖动
+            if _hit_titlebtn(pt.x, pt.y):
+                return HTCLIENT                    # 按钮区交给客户区鼠标消息
+            return HTCAPTION                       # 其余标题栏可拖动
         return HTCLIENT
     if msg == WM_LBUTTONDOWN or msg == WM_LBUTTONUP:
-        x = wp & 0xFFFF
-        y = (wp >> 16) & 0xFFFF
-        if x & 0x8000: x -= 0x10000
-        if y & 0x8000: y -= 0x10000
-        hit = None
-        for bid, bx, by, bw, bh in UI["title_btns"]:
-            if bx <= x < bx + bw and by <= y < by + bh:
-                hit = bid
-                break
+        x, y = _pt_from_lparam(lp)
+        hit = _hit_titlebtn(x, y)
         if msg == WM_LBUTTONDOWN and hit:
             u.SetCapture(hwnd)
             return 0
@@ -983,15 +1017,8 @@ def ui_wndproc(hwnd, msg, wp, lp):
                 u.DestroyWindow(hwnd)
                 return 0
     if msg == WM_MOUSEMOVE:
-        x = wp & 0xFFFF
-        y = (wp >> 16) & 0xFFFF
-        if x & 0x8000: x -= 0x10000
-        if y & 0x8000: y -= 0x10000
-        hit = None
-        for bid, bx, by, bw, bh in UI["title_btns"]:
-            if bx <= x < bx + bw and by <= y < by + bh:
-                hit = bid
-                break
+        x, y = _pt_from_lparam(lp)
+        hit = _hit_titlebtn(x, y)
         if UI.get("hover_titlebtn") != hit:
             UI["hover_titlebtn"] = hit
             u.InvalidateRect(hwnd, None, True)
@@ -1122,6 +1149,10 @@ def ui_wndproc(hwnd, msg, wp, lp):
         if ib:
             ix, iy, iw, ih = ib
             round_rect(hdc, ix, iy, iw, ih, 8 * UI["scale"], fill=INPUT_BG, line=BORDER)
+        # 卡片 C 分隔线：条件开关与秒数设置之间
+        sep = UI.get("sep_line")
+        if sep:
+            _hline(hdc, sep[0], sep[1], sep[2], sep[1], BORDER, 1)
         draw_titlebar(hdc)     # 自绘标题栏（含状态胶囊）
         draw_preview(hdc)      # 视频库缩略图直接画在预览区
         return 1
@@ -1177,8 +1208,8 @@ def run_ui():
     u.RegisterClassW(ctypes.byref(wc))
 
     # 无边框现代窗口：所有内容（含标题栏）都在客户区自绘
-    # 客户区高度 = 标题栏 60 + 内容到 580 + 底部留白 24 = 664
-    W, Ht = int(960 * S), int(664 * S)
+    # 统一网格：标题栏 0..60，内容区 76..606，底部留白 24 → 客户区 630
+    W, Ht = int(960 * S), int(630 * S)
     UI["win_w"], UI["win_h"] = W, Ht
     sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
     hwnd = u.CreateWindowExW(0, "AerialWallpaperUI", "动态壁纸 · 控制面板",
@@ -1240,60 +1271,61 @@ def run_ui():
     # 胶囊右边缘停在最小化按钮左侧（按钮区从 W-82*S 起），留 8px 间距
     UI["badge_x"] = int(W - 92 * S)
 
-    # ---------------- 卡片 A：当前壁纸 84..212 ----------------
-    card(M, 84 * S, LW, 128 * S)
-    static("当前壁纸", M + 18 * S, 102 * S, LW - 36 * S, 16 * S, f_small, muted=True, card=True)
-    UI["vid"] = static("", M + 18 * S, 124 * S, LW - 36 * S, 30 * S, f_big, card=True)
-    UI["sub"] = static("", M + 18 * S, 164 * S, LW - 36 * S, 24 * S, f_small, muted=True, card=True)
+    # ---------------- 卡片 A：当前壁纸 76..212 (136) ----------------
+    card(M, 76 * S, LW, 136 * S)
+    static("当前壁纸", M + 20 * S, 92 * S, LW - 40 * S, 18 * S, f_small, muted=True, card=True)
+    UI["vid"] = static("", M + 20 * S, 118 * S, LW - 40 * S, 30 * S, f_big, card=True)
+    UI["sub"] = static("", M + 20 * S, 160 * S, LW - 40 * S, 34 * S, f_small, muted=True, card=True)
 
-    # ---------------- 卡片 B：快捷操作 224..352 ----------------
-    card(M, 224 * S, LW, 128 * S)
-    button("立即动一下", ID_PLAY, M + 16 * S, 242 * S, LW - 32 * S, 44 * S)
-    bw2 = (LW - 44 * S) / 2
-    UI["toggle"] = button("停止壁纸", ID_STOP, M + 16 * S, 298 * S, bw2, 40 * S)
-    button("安装屏保", ID_INSTALL, M + 28 * S + bw2, 298 * S, bw2, 40 * S)
+    # ---------------- 卡片 B：快捷操作 228..372 (144) ----------------
+    card(M, 228 * S, LW, 144 * S)
+    button("立即动一下", ID_PLAY, M + 18 * S, 246 * S, LW - 36 * S, 48 * S)
+    bw2 = (LW - 54 * S) / 2
+    UI["toggle"] = button("停止壁纸", ID_STOP, M + 18 * S, 308 * S, bw2, 46 * S)
+    button("安装屏保", ID_INSTALL, M + 36 * S + bw2, 308 * S, bw2, 46 * S)
 
-    # ---------------- 卡片 C：播放设置 364..580 ----------------
-    card(M, 364 * S, LW, 216 * S)
+    # ---------------- 卡片 C：播放设置 388..606 (218) ----------------
+    card(M, 388 * S, LW, 218 * S)
     UI["auto"] = _ctrl(hwnd, "BUTTON", "开机自动运行", BS_OWNERDRAW | BS_CHECKBOX | WS_TABSTOP,
-                       M + 18 * S, 384 * S, 200 * S, 28 * S, ID_AUTO)
+                       M + 20 * S, 408 * S, 200 * S, 30 * S, ID_AUTO)
     _setfont(UI["auto"], f_norm)
     make_checkbox(UI["auto"], task_installed())
-    UI["auto_state"] = static("自启：检查中…", M + 234 * S, 388 * S, 200 * S, 22 * S,
+    UI["auto_state"] = static("自启：检查中…", M + 238 * S, 412 * S, 200 * S, 22 * S,
                               f_small, muted=True, card=True)
     UI["always"] = _ctrl(hwnd, "BUTTON", "让壁纸一直动", BS_OWNERDRAW | BS_CHECKBOX | WS_TABSTOP,
-                         M + 18 * S, 424 * S, 200 * S, 28 * S, ID_ALWAYS)
+                         M + 20 * S, 450 * S, 200 * S, 30 * S, ID_ALWAYS)
     _setfont(UI["always"], f_norm)
     make_checkbox(UI["always"], bool(load_cfg().get("always_play")))
-    UI["always_state"] = static("持续播放：未开启", M + 234 * S, 428 * S, 210 * S, 22 * S,
+    UI["always_state"] = static("持续播放：未开启", M + 238 * S, 454 * S, 210 * S, 22 * S,
                                 f_small, muted=True, card=True)
-    static("回到桌面后播放（秒，3–30）", M + 18 * S, 482 * S, 210 * S, 24 * S, f_norm, card=True)
-    UI["input_rect"] = (int(M + 236 * S), int(524 * S), int(68 * S), int(42 * S))
+    # 分隔线：设置项与秒数区间分开
+    UI["sep_line"] = (int(M + 20 * S), int(496 * S), int(M + LW - 20 * S))
+    static("回到桌面后播放（秒，3–30）", M + 20 * S, 514 * S, 220 * S, 28 * S, f_norm, card=True)
+    UI["input_rect"] = (int(M + 246 * S), int(548 * S), int(72 * S), int(42 * S))
     UI["burst"] = _ctrl(hwnd, "EDIT", str(int(float(load_cfg().get("burst_seconds", 8)))),
                         ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP,
-                        M + 242 * S, 530 * S, 56 * S, 30 * S, ID_BURST)
+                        M + 252 * S, 554 * S, 60 * S, 30 * S, ID_BURST)
     _setfont(UI["burst"], f_norm)
-    button("保存", ID_SAVE, M + 306 * S, 529 * S, 70 * S, 32 * S)
+    button("保存", ID_SAVE, M + 330 * S, 553 * S, 88 * S, 32 * S)
     # 原「目录：APP_DIR」已删除：那是程序安装目录，并非视频库位置，对用户无意义
 
-    # ---------------- 右侧：视频库列表 + 缩略预览（与左栏同样落在 y=580） ----------------
+    # ---------------- 右侧：视频库列表 + 缩略预览（与左栏 76..606 完全对齐） ----------------
     RX = 500 * S
     RW = 436 * S
-    # 右栏标题下移到标题栏下方，避免与自绘标题栏重叠
-    static("视频库", RX, 84 * S, RW, 30 * S, f_big)
-    static("点击预览 · 双击设为壁纸", RX, 114 * S, RW, 18 * S, f_small, muted=True)
+    static("视频库", RX, 76 * S, RW, 30 * S, f_big)
+    static("点击预览 · 双击设为壁纸", RX, 108 * S, RW, 18 * S, f_small, muted=True)
 
-    # ListBox：LBS_NOTIFY(1)|LBS_HASSTRINGS(0x40)|LBS_OWNERDRAWFIXED(0x10)
-    #          |LBS_NOINTEGRALHEIGHT(0x100)|WS_VSCROLL(0x200000)
+    # ListBox：LBS_NOTIFY(1)|LBS_HASSTRINGS(0x40)|LBS_OWNERDRAWFIXED(0x10)|WS_VSCROLL(0x200000)
+    #          不用 LBS_NOINTEGRALHEIGHT，让控件高度自动取整行，避免底部出现半行
     UI["liblist"] = u.CreateWindowExW(
         0, "ListBox", None,
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x00200000 | 0x0001 | 0x0040 | 0x0010 | 0x0100,
-        int(RX), int(140 * S), int(RW), int(236 * S), hwnd, ID_LIBLIST, hinst, None)
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x00200000 | 0x0001 | 0x0040 | 0x0010,
+        int(RX), int(138 * S), int(RW), int(320 * S), hwnd, ID_LIBLIST, hinst, None)
     _setfont(UI["liblist"], f_norm)
 
     # 预览区：圆角白底卡片，GDI+ 直接绘 JPG（见 draw_preview）
-    LIB["preview_rect"] = (int(RX), int(390 * S), int(RW), int(144 * S))
-    button("使用此视频", ID_LIBUSE, RX, 546 * S, RW, 40 * S)
+    LIB["preview_rect"] = (int(RX), int(470 * S), int(RW), int(96 * S))
+    button("使用此视频", ID_LIBUSE, RX, 576 * S, RW, 30 * S)
 
     # 填充列表：扫描视频目录，选中当前正在用的那条
     items = scan_library()
