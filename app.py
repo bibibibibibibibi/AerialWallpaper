@@ -965,8 +965,9 @@ def run_ui():
     wc.lpszClassName = "AerialWallpaperUI"
     u.RegisterClassW(ctypes.byref(wc))
 
-    # 左侧控制区 452 + 右侧视频库 436
-    W, Ht = int(960 * S), int(644 * S)
+    # 左侧控制区 452 + 右侧视频库 436；两栏内容统一 84..580 底部对齐
+    # 高度需含标题栏/边框（约 40px），客户区才能容纳到 y=580 的内容
+    W, Ht = int(960 * S), int(624 * S)
     sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
     hwnd = u.CreateWindowExW(0, "AerialWallpaperUI", "动态壁纸 · 控制面板",
                              0x00CF0000 | 0x00020000 | WS_CLIPCHILDREN,
@@ -1007,65 +1008,63 @@ def run_ui():
     M = 24 * S
     LW = 452 * S
 
-    # ---------------- 顶部：标题 + 状态胶囊（胶囊自绘于右上） ----------------
-    static("动态壁纸", M, 20 * S, 400 * S, 34 * S, f_title)
+    # ---------------- 顶部：标题 + 状态胶囊（胶囊自绘于左栏标题右端） ----------------
+    # 标题/副标题 STATIC 宽度收窄，避免其不透明背景盖住画在父窗口上的胶囊
+    static("动态壁纸", M, 20 * S, 140 * S, 34 * S, f_title)
     static("回到桌面自动播放几秒，其余时间定格 · 几乎零开销",
-           M, 58 * S, 440 * S, 18 * S, f_small, muted=True)
-    UI["badge_x"] = int(960 * S - M)
+           M, 56 * S, 340 * S, 18 * S, f_small, muted=True)
+    UI["badge_x"] = int(M + LW - 8 * S)
 
-    # ---------------- 卡片 A：当前壁纸 ----------------
-    card(M, 92 * S, LW, 96 * S)
-    static("当前壁纸", M + 18 * S, 105 * S, LW - 36 * S, 16 * S, f_small, muted=True, card=True)
-    UI["vid"] = static("", M + 18 * S, 124 * S, LW - 36 * S, 24 * S, f_big, card=True)
-    UI["sub"] = static("", M + 18 * S, 154 * S, LW - 36 * S, 18 * S, f_small, muted=True, card=True)
+    # ---------------- 卡片 A：当前壁纸 84..212 ----------------
+    card(M, 84 * S, LW, 128 * S)
+    static("当前壁纸", M + 18 * S, 102 * S, LW - 36 * S, 16 * S, f_small, muted=True, card=True)
+    UI["vid"] = static("", M + 18 * S, 124 * S, LW - 36 * S, 30 * S, f_big, card=True)
+    UI["sub"] = static("", M + 18 * S, 164 * S, LW - 36 * S, 24 * S, f_small, muted=True, card=True)
 
-    # ---------------- 卡片 B：快捷操作 ----------------
-    card(M, 200 * S, LW, 118 * S)
-    button("立即动一下", ID_PLAY, M + 16 * S, 216 * S, LW - 32 * S, 36 * S)
-    bw2 = (LW - 42 * S) / 2
-    UI["toggle"] = button("停止壁纸", ID_STOP, M + 16 * S, 262 * S, bw2, 32 * S)
-    button("安装屏保", ID_INSTALL, M + 26 * S + bw2, 262 * S, bw2, 32 * S)
+    # ---------------- 卡片 B：快捷操作 224..352 ----------------
+    card(M, 224 * S, LW, 128 * S)
+    button("立即动一下", ID_PLAY, M + 16 * S, 242 * S, LW - 32 * S, 44 * S)
+    bw2 = (LW - 44 * S) / 2
+    UI["toggle"] = button("停止壁纸", ID_STOP, M + 16 * S, 298 * S, bw2, 40 * S)
+    button("安装屏保", ID_INSTALL, M + 28 * S + bw2, 298 * S, bw2, 40 * S)
 
-    # ---------------- 卡片 C：播放设置 ----------------
-    card(M, 330 * S, LW, 130 * S)
+    # ---------------- 卡片 C：播放设置 364..580 ----------------
+    card(M, 364 * S, LW, 216 * S)
     UI["auto"] = _ctrl(hwnd, "BUTTON", "开机自动运行", BS_AUTOCHECKBOX | WS_TABSTOP,
-                       M + 16 * S, 344 * S, 180 * S, 24 * S, ID_AUTO)
+                       M + 18 * S, 384 * S, 200 * S, 28 * S, ID_AUTO)
     _setfont(UI["auto"], f_norm)
-    UI["auto_state"] = static("自启：检查中…", M + 210 * S, 348 * S, 210 * S, 18 * S,
+    UI["auto_state"] = static("自启：检查中…", M + 234 * S, 388 * S, 200 * S, 22 * S,
                               f_small, muted=True, card=True)
     UI["always"] = _ctrl(hwnd, "BUTTON", "让壁纸一直动", BS_AUTOCHECKBOX | WS_TABSTOP,
-                         M + 16 * S, 376 * S, 180 * S, 24 * S, ID_ALWAYS)
+                         M + 18 * S, 424 * S, 200 * S, 28 * S, ID_ALWAYS)
     _setfont(UI["always"], f_norm)
-    UI["always_state"] = static("持续播放：未开启", M + 210 * S, 380 * S, 220 * S, 18 * S,
+    UI["always_state"] = static("持续播放：未开启", M + 234 * S, 428 * S, 210 * S, 22 * S,
                                 f_small, muted=True, card=True)
-    static("回到桌面后播放（秒，3–30）", M + 18 * S, 416 * S, 205 * S, 20 * S, f_norm, card=True)
+    static("回到桌面后播放（秒，3–30）", M + 18 * S, 482 * S, 210 * S, 24 * S, f_norm, card=True)
     UI["burst"] = _ctrl(hwnd, "EDIT", str(int(float(load_cfg().get("burst_seconds", 8)))),
                         WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP,
-                        M + 232 * S, 412 * S, 48 * S, 26 * S, ID_BURST)
+                        M + 240 * S, 528 * S, 52 * S, 34 * S, ID_BURST)
     _setfont(UI["burst"], f_norm)
-    button("保存", ID_SAVE, M + 292 * S, 412 * S, 64 * S, 28 * S)
+    button("保存", ID_SAVE, M + 306 * S, 528 * S, 70 * S, 34 * S)
+    # 原「目录：APP_DIR」已删除：那是程序安装目录，并非视频库位置，对用户无意义
 
-    static(f"目录：{APP_DIR}", M, 474 * S, LW, 30 * S, f_small, muted=True)
-
-    # ---------------- 右侧：视频库列表 + 缩略预览 ----------------
+    # ---------------- 右侧：视频库列表 + 缩略预览（与左栏同样落在 y=580） ----------------
     RX = 500 * S
     RW = 436 * S
-    # 标题宽度收窄，给右上角状态胶囊让位（STATIC 不透明背景会盖住父窗口自绘的徽章）
-    head_w = RW - 150 * S
-    static("视频库", RX, 24 * S, head_w, 24 * S, f_big)
-    static("点击预览 · 双击设为壁纸", RX, 52 * S, head_w, 18 * S, f_small, muted=True)
+    static("视频库", RX, 20 * S, RW, 30 * S, f_big)
+    static("点击预览 · 双击设为壁纸", RX, 54 * S, RW, 18 * S, f_small, muted=True)
 
     # ListBox：LBS_NOTIFY(1)|LBS_HASSTRINGS(0x40)|LBS_OWNERDRAWFIXED(0x10)
     #          |LBS_NOINTEGRALHEIGHT(0x100)|WS_VSCROLL(0x200000)
     UI["liblist"] = u.CreateWindowExW(
         0, "ListBox", None,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x00200000 | 0x0001 | 0x0040 | 0x0010 | 0x0100,
-        int(RX), int(92 * S), int(RW), int(280 * S), hwnd, ID_LIBLIST, hinst, None)
+        int(RX), int(84 * S), int(RW), int(280 * S), hwnd, ID_LIBLIST, hinst, None)
     _setfont(UI["liblist"], f_norm)
 
     # 预览区：圆角白底卡片，GDI+ 直接绘 JPG（见 draw_preview）
-    LIB["preview_rect"] = (int(RX), int(384 * S), int(RW), int(160 * S))
-    button("使用此视频", ID_LIBUSE, RX, 556 * S, RW, 34 * S)
+    LIB["preview_rect"] = (int(RX), int(376 * S), int(RW), int(152 * S))
+    button("使用此视频", ID_LIBUSE, RX, 540 * S, RW, 40 * S)
 
     # 填充列表：扫描视频目录，选中当前正在用的那条
     items = scan_library()
