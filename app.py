@@ -307,6 +307,22 @@ u.TranslateMessage.argtypes = [ctypes.c_void_p]
 u.DispatchMessageW.restype = ctypes.c_long
 u.DispatchMessageW.argtypes = [ctypes.c_void_p]
 
+# 自绘标题栏 / 复选框 / 圆角窗口所需 API
+u.GetParent.argtypes = [H]
+u.GetParent.restype = H
+u.GetDlgCtrlID.argtypes = [H]
+u.GetDlgCtrlID.restype = ctypes.c_int
+u.SetCapture.argtypes = [H]
+u.ReleaseCapture.argtypes = []
+u.ScreenToClient.argtypes = [H, ctypes.c_void_p]
+u.SetWindowRgn.argtypes = [H, wintypes.HRGN, wintypes.BOOL]
+g32.CreateRoundRectRgn.argtypes = [ctypes.c_int] * 6
+g32.CreateRoundRectRgn.restype = wintypes.HRGN
+g32.CreatePen.argtypes = [ctypes.c_int, ctypes.c_uint, wintypes.COLORREF]
+g32.CreatePen.restype = wintypes.HPEN
+g32.MoveToEx.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+g32.LineTo.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+
 WM_SETFONT = 0x0030
 WM_COMMAND = 0x0111
 WM_TIMER = 0x0113
@@ -320,8 +336,23 @@ WM_MOUSEMOVE = 0x0200
 WM_MOUSELEAVE = 0x02A3
 WM_CLOSE = 0x0010
 WM_DESTROY = 0x0002
+WM_NCHITTEST = 0x0084
+WM_NCMOUSEMOVE = 0x00A0
+WM_NCLBUTTONDOWN = 0x00A1
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_GETMINMAXINFO = 0x0024
 BM_GETCHECK = 0x00F0
 BM_SETCHECK = 0x00F1
+HTCAPTION = 2
+HTCLIENT = 1
+HTMINBUTTON = 8
+HTCLOSE = 20
+WS_POPUP = 0x80000000
+WS_THICKFRAME = 0x00040000
+WS_SYSMENU = 0x00080000
+WS_MINIMIZEBOX = 0x00020000
+SW_MINIMIZE = 6
 
 WS_CHILD = 0x40000000
 WS_VISIBLE = 0x10000000
@@ -330,25 +361,33 @@ WS_BORDER = 0x00800000
 WS_CLIPCHILDREN = 0x02000000
 BS_AUTOCHECKBOX = 0x00000003
 BS_OWNERDRAW = 0x0000000B
+BS_CHECKBOX = 0x00000002
 ES_NUMBER = 0x00002000
 ES_AUTOHSCROLL = 0x00000080
+ID_MINBTN = 1012
+ID_CLOSEBTN = 1013
+TITLE_H = 60          # 自绘标题栏高度（逻辑像素）
 
-# ---- 浅色现代卡片风配色（COLORREF 00BBGGRR）----
-BG = 0x00F6F1EE          # 窗口背景 #EEF1F6
-CARD = 0x00FFFFFF        # 卡片白
-FG = 0x00241D1A          # 主文字 #1A1D24
-MUTED = 0x0094847A       # 次要文字 #7A8494
-ACCENT = 0x00ED6F2F      # 主蓝 #2F6FED
-ACCENT_HOVER = 0x00F0804A  # 悬停亮蓝 #4A80F0
-ACCENT_DOWN = 0x00D05F25   # 按下深蓝 #255FD0
-BORDER = 0x00EEE7E3      # 卡片描边 #E3E7EE
-GREEN = 0x006C9D0F       # 播放绿 #0F9D6C
-GREEN_BG = 0x00EEF6E5    # 胶囊浅绿底 #E5F6EE
-GRAY = 0x00A3938A        # 定格灰 #8A93A3
-GRAY_BG = 0x00F5F0ED     # 胶囊浅灰底 #EDF0F5
-AMBER = 0x000677D9       # 未运行琥珀 #D97706
-AMBER_BG = 0x00E3F1FD    # 胶囊浅琥珀底 #FDF1E3
-SEL_BG = 0x00FFEDE3      # 列表选中浅蓝 #E3EDFF
+# ---- 现代扁平配色（COLORREF 00BBGGRR）----
+BG = 0x00F4F6F9          # 窗口底 #F4F6F9 冷灰白
+CARD = 0x00FFFFFF        # 卡片纯白
+FG = 0x0030241B          # 主文字 #1B2430 深墨蓝
+MUTED = 0x0094877B       # 次要文字 #7B8794
+ACCENT = 0x00EB6325      # 主色 #2563EB 现代靛蓝
+ACCENT_HOVER = 0x00F27235  # 悬停 #3572F2
+ACCENT_DOWN = 0x00C85215   # 按下 #1552C8
+BORDER = 0x00EFE9E4      # 卡片描边 #E4E9EF
+GREEN = 0x001FB473       # 播放绿 #10B473
+GREEN_BG = 0x00E3F7EF    # 胶囊浅绿底 #EFF7E3
+GRAY = 0x009AA1A8        # 定格灰 #8A939A
+GRAY_BG = 0x00F0F1F2     # 胶囊浅灰底 #F1F1F0
+AMBER = 0x000C9BF0       # 未运行琥珀 #D98C0C
+AMBER_BG = 0x00E6F4FD    # 胶囊浅琥珀底 #FDF4E6
+SEL_BG = 0x00FEF0E8      # 列表选中浅蓝 #E8F0FE
+TITLE_BG = 0x00FCFDFE    # 自绘标题栏底 #FCFDFE
+HOVER_BG = 0x00F2F5F9    # 控件悬停浅灰 #F5F7F2
+INPUT_BG = 0x00F7F8FA    # 输入框浅灰底 #FAF8F7
+CHECK_BG = 0x00E9EDF2    # 未选中复选框底 #F2EDE9
 
 UI = {"hwnd": None, "state": None, "sub": None, "vid": None,
       "color": FG, "state_color": FG, "auto": None, "burst": None,
@@ -357,7 +396,9 @@ UI = {"hwnd": None, "state": None, "sub": None, "vid": None,
       "bg_brush": None, "card_brush": None, "null_brush": None,
       "scale": 1.0, "badge": ("未运行", "off"), "badge_sig": None,
       "hover_btn": None, "btn_oldproc": {}, "muted": set(), "cards": [],
-      "ctrl_bg": {}}
+      "ctrl_bg": {}, "check_state": {}, "title_btns": [], "hover_titlebtn": None,
+      "title_rect": None, "win_w": 0, "win_h": 0, "input_brush": None,
+      "font_segoe": None}
 
 ID_PLAY, ID_SWITCH, ID_STOP, ID_START, ID_SAVE = 1001, 1002, 1003, 1004, 1005
 ID_AUTO, ID_BURST, ID_ALWAYS, ID_INSTALL = 1006, 1007, 1008, 1009
@@ -522,7 +563,7 @@ def draw_badge(hdc):
     w = int(tw + 46 * S)
     h = int(30 * S)
     x = UI["badge_x"] - w
-    y = int(26 * S)
+    y = int((TITLE_H * UI["scale"] - 28 * UI["scale"]) / 2)
     UI["badge_rect"] = (x - 4, y - 4, w + 8, h + 8)
     round_rect(hdc, x, y, w, h, h / 2.0, fill=bgc)
     # 圆点
@@ -531,6 +572,94 @@ def draw_badge(hdc):
     dy = y + (h - 2 * dr) // 2
     round_rect(hdc, dx, dy, 2 * dr, 2 * dr, dr, fill=dot)
     draw_text(hdc, text, dx + 2 * dr + int(7 * S), y, tw + 8, h, dot, f)
+
+
+def _hline(hdc, x1, y1, x2, y2, color, width=1):
+    """GDI 直线（自绘图标用）"""
+    pen = g32.CreatePen(0, max(1, int(width)), color)
+    old = g32.SelectObject(hdc, pen)
+    g32.MoveToEx(hdc, int(x1), int(y1), None)
+    g32.LineTo(hdc, int(x2), int(y2))
+    g32.SelectObject(hdc, old)
+    g32.DeleteObject(pen)
+
+
+def draw_titlebar(hdc):
+    """顶部自绘标题栏：应用标记 + 标题 + 状态胶囊 + 最小化/关闭按钮"""
+    S = UI["scale"]
+    W = UI["win_w"]
+    H = int(TITLE_H * S)
+    # 标题栏底色（纯白，与卡片一致，用细分隔线区别于内容）
+    br = g32.CreateSolidBrush(TITLE_BG)
+    rc = wintypes.RECT(0, 0, int(W), H)
+    u.FillRect(hdc, ctypes.byref(rc), br)
+    g32.DeleteObject(br)
+    _hline(hdc, 0, H - 1, W, H - 1, BORDER, 1)
+
+    # 应用标记：蓝色圆角方块 + 白色简洁"山/播放"斜纹
+    ix, iy, sz = int(18 * S), int(15 * S), int(30 * S)
+    round_rect(hdc, ix, iy, sz, sz, 8 * S, fill=ACCENT)
+    # 抽象"信号"图标：三条由短到长的白线
+    for i, ln in enumerate((7, 11, 15)):
+        ly = iy + sz / 2 - 6 * S + i * 5 * S
+        _hline(hdc, ix + sz / 2 - ln * S / 2, ly, ix + sz / 2 + ln * S / 2, ly,
+               0x00FFFFFF, 1.6 * S)
+
+    # 标题 + 副标题
+    draw_text(hdc, "动态壁纸", ix + sz + int(12 * S), int(11 * S), 160 * S, 24 * S,
+              FG, UI["f_title"])
+    draw_text(hdc, "回到桌面自动播放几秒，其余时间定格 · 几乎零开销",
+              ix + sz + int(13 * S), int(35 * S), 380 * S, 16 * S, MUTED, UI["f_small"])
+
+    # 状态胶囊（复用 draw_badge，它用 badge_x 定位在标题栏右端）
+    draw_badge(hdc)
+
+    # 右上角窗口按钮：最小化 / 关闭
+    bs = int(30 * S)
+    by = (H - bs) // 2
+    gap = int(6 * S)
+    close_x = int(W) - int(16 * S) - bs
+    min_x = close_x - bs - gap
+    UI["title_btns"] = [(ID_MINBTN, min_x, by, bs, bs), (ID_CLOSEBTN, close_x, by, bs, bs)]
+    hover = UI.get("hover_titlebtn")
+    for bid, bx, byy, bw, bh in UI["title_btns"]:
+        if hover == bid:
+            round_rect(hdc, bx, byy, bw, bh, 6 * S,
+                       fill=(0x00E81123 if bid == ID_CLOSEBTN else HOVER_BG))
+        cx, cy = bx + bw / 2, byy + bh / 2
+        col = 0x00FFFFFF if (hover == bid and bid == ID_CLOSEBTN) else FG
+        if bid == ID_MINBTN:
+            _hline(hdc, cx - 6 * S, cy, cx + 6 * S, cy, col, 1.5 * S)
+        else:
+            d = 5 * S
+            _hline(hdc, cx - d, cy - d, cx + d, cy + d, col, 1.5 * S)
+            _hline(hdc, cx + d, cy - d, cx - d, cy + d, col, 1.5 * S)
+
+
+def draw_checkbox(dis):
+    """自绘现代化复选框：圆角方块 + 对勾，选中蓝色填充"""
+    S = UI["scale"]
+    rc = dis.rcItem
+    x, y, w, h = rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top
+    hwnd = dis.hwndItem
+    checked = bool(UI["check_state"].get(hwnd, False))
+    hovered = UI.get("hover_btn") == hwnd
+    side = int(17 * S)
+    bx = x + int(2 * S)
+    by = y + (h - side) // 2
+    if checked:
+        round_rect(dis.hDC, bx, by, side, side, 4 * S, fill=ACCENT)
+        # 白色对勾
+        _hline(dis.hDC, bx + 4 * S, by + 9 * S, bx + 7.5 * S, by + 12.5 * S, 0x00FFFFFF, 2 * S)
+        _hline(dis.hDC, bx + 7.5 * S, by + 12.5 * S, bx + 13.5 * S, by + 5 * S, 0x00FFFFFF, 2 * S)
+    else:
+        round_rect(dis.hDC, bx, by, side, side, 4 * S,
+                   fill=(HOVER_BG if hovered else INPUT_BG), line=BORDER, line_w=1.0)
+    n = u.GetWindowTextLengthW(hwnd) + 1
+    buf = ctypes.create_unicode_buffer(n)
+    u.GetWindowTextW(hwnd, buf, n)
+    draw_text(dis.hDC, buf.value, bx + side + int(8 * S), y,
+              w - side - int(12 * S), h, FG, UI["f_norm"])
 
 
 def draw_button(dis):
@@ -585,7 +714,20 @@ def draw_list_item(dis):
 
 
 def _btn_wndproc(hwnd, msg, wp, lp):
-    """按钮子类化：追踪悬停（owner-draw 按钮的 hover 效果）"""
+    """按钮子类化：悬停效果 + 自绘复选框状态（兼容 BM_GETCHECK/BM_SETCHECK/BM_CLICK）"""
+    if hwnd in UI["check_state"]:
+        if msg == BM_GETCHECK:
+            return 1 if UI["check_state"][hwnd] else 0
+        if msg == BM_SETCHECK:
+            UI["check_state"][hwnd] = bool(wp)
+            u.InvalidateRect(hwnd, None, False)
+            return 0
+        if msg == WM_LBUTTONUP or msg == 0x00F5:   # 真实点击 | BM_CLICK（测试脚本）
+            UI["check_state"][hwnd] = not UI["check_state"][hwnd]
+            u.InvalidateRect(hwnd, None, False)
+            u.SendMessageW(u.GetParent(hwnd), WM_COMMAND,
+                           u.GetDlgCtrlID(hwnd), hwnd)
+            return 0                                # 拦截：不让默认过程重复发 BN_CLICKED
     if msg == WM_MOUSEMOVE:
         if UI.get("hover_btn") != hwnd:
             UI["hover_btn"] = hwnd
@@ -613,9 +755,16 @@ def make_ownerdraw_button(b):
     UI["btn_oldproc"][b] = old
 
 
-def _font(px, bold=False):
+def make_checkbox(b, initial=False):
+    """自绘复选框：登记状态 + 子类化（BM_GETCHECK/SETCHECK/CLICK 走 UI 状态）"""
+    UI["check_state"][b] = bool(initial)
+    old = u.SetWindowLongPtrW(b, -4, ctypes.cast(_BTN_PROC, ctypes.c_void_p).value)
+    UI["btn_oldproc"][b] = old
+
+
+def _font(px, bold=False, name="Microsoft YaHei UI"):
     return g32.CreateFontW(-int(px), 0, 0, 0, 700 if bold else 400, 0, 0, 0,
-                           1, 0, 0, 5, 0, "Microsoft YaHei UI")
+                           1, 0, 0, 5, 0, name)
 
 
 def _ctrl(parent, cls, text, style, x, y, w, h, cid=0):
@@ -755,8 +904,8 @@ def refresh_ui():
         UI["badge"] = badge
         if UI.get("hwnd") and UI.get("badge_x"):
             S = UI["scale"]
-            rc = wintypes.RECT(UI["badge_x"] - int(250 * S), int(16 * S),
-                               UI["badge_x"] + 8, int(68 * S))
+            rc = wintypes.RECT(UI["badge_x"] - int(250 * S), 0,
+                               UI["badge_x"] + 8, int(TITLE_H * S))
             u.InvalidateRect(UI["hwnd"], ctypes.byref(rc), True)
     # 智能切换按钮：文字跟随运行状态（每秒刷新，无抖动）
     if UI.get("toggle"):
@@ -797,8 +946,63 @@ def auto_toggle_async(enable):
 
 
 def ui_wndproc(hwnd, msg, wp, lp):
+    if msg == WM_NCHITTEST:
+        # 自绘标题栏区域：交给 DefWindowProc 判断；窗口按钮由客户区鼠标消息处理
+        pt = wintypes.POINT()
+        v = (lp & 0xFFFF) if isinstance(lp, int) else 0
+        w = (lp >> 16) & 0xFFFF if isinstance(lp, int) else 0
+        pt.x = v - 0x10000 if v & 0x8000 else v
+        pt.y = w - 0x10000 if w & 0x8000 else w
+        u.ScreenToClient(hwnd, ctypes.byref(pt))
+        if 0 <= pt.y < int(TITLE_H * UI["scale"]):
+            # 标题栏右侧按钮区域返回 HTCLIENT，让点击可被客户区消息捕获
+            for bid, bx, by, bw, bh in UI["title_btns"]:
+                if bx <= pt.x < bx + bw and by <= pt.y < by + bh:
+                    return HTCLIENT
+            return HTCAPTION           # 其余标题栏可拖动
+        return HTCLIENT
+    if msg == WM_LBUTTONDOWN or msg == WM_LBUTTONUP:
+        x = wp & 0xFFFF
+        y = (wp >> 16) & 0xFFFF
+        if x & 0x8000: x -= 0x10000
+        if y & 0x8000: y -= 0x10000
+        hit = None
+        for bid, bx, by, bw, bh in UI["title_btns"]:
+            if bx <= x < bx + bw and by <= y < by + bh:
+                hit = bid
+                break
+        if msg == WM_LBUTTONDOWN and hit:
+            u.SetCapture(hwnd)
+            return 0
+        if msg == WM_LBUTTONUP:
+            u.ReleaseCapture()
+            if hit == ID_MINBTN:
+                u.ShowWindow(hwnd, SW_MINIMIZE)
+                return 0
+            if hit == ID_CLOSEBTN:
+                u.DestroyWindow(hwnd)
+                return 0
+    if msg == WM_MOUSEMOVE:
+        x = wp & 0xFFFF
+        y = (wp >> 16) & 0xFFFF
+        if x & 0x8000: x -= 0x10000
+        if y & 0x8000: y -= 0x10000
+        hit = None
+        for bid, bx, by, bw, bh in UI["title_btns"]:
+            if bx <= x < bx + bw and by <= y < by + bh:
+                hit = bid
+                break
+        if UI.get("hover_titlebtn") != hit:
+            UI["hover_titlebtn"] = hit
+            u.InvalidateRect(hwnd, None, True)
     if msg == WM_COMMAND:
         cid = wp & 0xFFFF
+        if cid == ID_MINBTN:
+            u.ShowWindow(hwnd, SW_MINIMIZE)
+            return 0
+        if cid == ID_CLOSEBTN:
+            u.DestroyWindow(hwnd)
+            return 0
         if cid == ID_PLAY:
             if is_running():
                 signal_player(EVT_PLAY)
@@ -878,7 +1082,10 @@ def ui_wndproc(hwnd, msg, wp, lp):
     if msg == WM_DRAWITEM:
         dis = ctypes.cast(lp, ctypes.POINTER(DRAWITEMSTRUCT)).contents
         if dis.CtlType == 4:                       # ODT_BUTTON
-            draw_button(dis)
+            if dis.CtlID in (ID_AUTO, ID_ALWAYS):
+                draw_checkbox(dis)
+            else:
+                draw_button(dis)
             return 1
         if dis.CtlType == 2:                       # ODT_LISTBOX
             draw_list_item(dis)
@@ -893,17 +1100,16 @@ def ui_wndproc(hwnd, msg, wp, lp):
         g32.SetTextColor(hdc, MUTED if lp in UI["muted"] else FG)
         return UI["card_brush"] if bgc == CARD else UI["bg_brush"]
     if msg == WM_CTLCOLORBTN:
-        # 复选框：文字背景用卡片白
+        # 复选框已自绘，这里仅兜底
         hdc = wintypes.HDC(wp)
-        g32.SetBkMode(hdc, 2)
-        g32.SetBkColor(hdc, CARD)
-        g32.SetTextColor(hdc, FG)
+        g32.SetBkMode(hdc, 1)
         return UI["card_brush"]
     if msg == WM_CTLCOLOREDIT:
         hdc = wintypes.HDC(wp)
-        g32.SetBkColor(hdc, CARD)
+        g32.SetBkMode(hdc, 1)
+        g32.SetBkColor(hdc, INPUT_BG)
         g32.SetTextColor(hdc, FG)
-        return UI["card_brush"]
+        return UI["input_brush"]
     if msg == WM_ERASEBKGND:
         rect = wintypes.RECT()
         u.GetClientRect(hwnd, ctypes.byref(rect))
@@ -911,7 +1117,12 @@ def ui_wndproc(hwnd, msg, wp, lp):
         u.FillRect(hdc, ctypes.byref(rect), UI["bg_brush"])
         for (cx, cy, cw, ch) in UI["cards"]:
             round_rect(hdc, cx, cy, cw, ch, 12 * UI["scale"], fill=CARD, line=BORDER)
-        draw_badge(hdc)
+        # 播放秒数输入框：自绘圆角浅灰底（EDIT 控件叠在上方且无边框）
+        ib = UI.get("input_rect")
+        if ib:
+            ix, iy, iw, ih = ib
+            round_rect(hdc, ix, iy, iw, ih, 8 * UI["scale"], fill=INPUT_BG, line=BORDER)
+        draw_titlebar(hdc)     # 自绘标题栏（含状态胶囊）
         draw_preview(hdc)      # 视频库缩略图直接画在预览区
         return 1
     if msg == WM_CLOSE:
@@ -965,22 +1176,38 @@ def run_ui():
     wc.lpszClassName = "AerialWallpaperUI"
     u.RegisterClassW(ctypes.byref(wc))
 
-    # 左侧控制区 452 + 右侧视频库 436；两栏内容统一 84..580 底部对齐
-    # 高度需含标题栏/边框（约 40px），客户区才能容纳到 y=580 的内容
-    W, Ht = int(960 * S), int(624 * S)
+    # 无边框现代窗口：所有内容（含标题栏）都在客户区自绘
+    # 客户区高度 = 标题栏 60 + 内容到 580 + 底部留白 24 = 664
+    W, Ht = int(960 * S), int(664 * S)
+    UI["win_w"], UI["win_h"] = W, Ht
     sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
     hwnd = u.CreateWindowExW(0, "AerialWallpaperUI", "动态壁纸 · 控制面板",
-                             0x00CF0000 | 0x00020000 | WS_CLIPCHILDREN,
+                             WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
                              (sw - W) // 2, (sh - Ht) // 2, W, Ht,
                              None, None, hinst, None)
     if not hwnd:
         sys.exit("创建窗口失败")
     UI["hwnd"] = hwnd
+    # 圆角窗口区域 + 投影
+    region = g32.CreateRoundRectRgn(0, 0, W + 1, Ht + 1, int(16 * S), int(16 * S))
+    u.SetWindowRgn(hwnd, region, True)
+    try:
+        # DWM 投影：扩展边框到客户区外一像素（WS_POPUP 无默认阴影）
+        dwm = ctypes.WinDLL("dwmapi")
+        class _MARG(ctypes.Structure):
+            _fields_ = [("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
+                        ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int)]
+        m = _MARG(1, 1, 1, 1)
+        dwm.DwmExtendFrameIntoClientArea.argtypes = [H, ctypes.POINTER(_MARG)]
+        dwm.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(m))
+    except Exception:
+        pass
     u.ShowWindow(hwnd, 9)          # SW_RESTORE：显示并激活窗口
     u.SetForegroundWindow(hwnd)
     u.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)   # TOPMOST|NOMOVE|NOSIZE 确保不被遮挡
     UI["bg_brush"] = g32.CreateSolidBrush(BG)
     UI["card_brush"] = g32.CreateSolidBrush(CARD)
+    UI["input_brush"] = g32.CreateSolidBrush(INPUT_BG)
     UI["scale"] = S
 
     f_title = _font(22 * S, True); f_big = _font(13 * S, True)
@@ -1008,12 +1235,10 @@ def run_ui():
     M = 24 * S
     LW = 452 * S
 
-    # ---------------- 顶部：标题 + 状态胶囊（胶囊自绘于左栏标题右端） ----------------
-    # 标题/副标题 STATIC 宽度收窄，避免其不透明背景盖住画在父窗口上的胶囊
-    static("动态壁纸", M, 20 * S, 140 * S, 34 * S, f_title)
-    static("回到桌面自动播放几秒，其余时间定格 · 几乎零开销",
-           M, 56 * S, 340 * S, 18 * S, f_small, muted=True)
-    UI["badge_x"] = int(M + LW - 8 * S)
+    # 标题栏（0..60）整体自绘于父窗口：标题、副标题、状态胶囊、窗口按钮均不建子窗口，
+    # 避免 STATIC 的不透明背景盖住自绘内容。胶囊右边缘定位在窗口按钮左侧。
+    # 胶囊右边缘停在最小化按钮左侧（按钮区从 W-82*S 起），留 8px 间距
+    UI["badge_x"] = int(W - 92 * S)
 
     # ---------------- 卡片 A：当前壁纸 84..212 ----------------
     card(M, 84 * S, LW, 128 * S)
@@ -1030,41 +1255,45 @@ def run_ui():
 
     # ---------------- 卡片 C：播放设置 364..580 ----------------
     card(M, 364 * S, LW, 216 * S)
-    UI["auto"] = _ctrl(hwnd, "BUTTON", "开机自动运行", BS_AUTOCHECKBOX | WS_TABSTOP,
+    UI["auto"] = _ctrl(hwnd, "BUTTON", "开机自动运行", BS_OWNERDRAW | BS_CHECKBOX | WS_TABSTOP,
                        M + 18 * S, 384 * S, 200 * S, 28 * S, ID_AUTO)
     _setfont(UI["auto"], f_norm)
+    make_checkbox(UI["auto"], task_installed())
     UI["auto_state"] = static("自启：检查中…", M + 234 * S, 388 * S, 200 * S, 22 * S,
                               f_small, muted=True, card=True)
-    UI["always"] = _ctrl(hwnd, "BUTTON", "让壁纸一直动", BS_AUTOCHECKBOX | WS_TABSTOP,
+    UI["always"] = _ctrl(hwnd, "BUTTON", "让壁纸一直动", BS_OWNERDRAW | BS_CHECKBOX | WS_TABSTOP,
                          M + 18 * S, 424 * S, 200 * S, 28 * S, ID_ALWAYS)
     _setfont(UI["always"], f_norm)
+    make_checkbox(UI["always"], bool(load_cfg().get("always_play")))
     UI["always_state"] = static("持续播放：未开启", M + 234 * S, 428 * S, 210 * S, 22 * S,
                                 f_small, muted=True, card=True)
     static("回到桌面后播放（秒，3–30）", M + 18 * S, 482 * S, 210 * S, 24 * S, f_norm, card=True)
+    UI["input_rect"] = (int(M + 236 * S), int(524 * S), int(68 * S), int(42 * S))
     UI["burst"] = _ctrl(hwnd, "EDIT", str(int(float(load_cfg().get("burst_seconds", 8)))),
-                        WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP,
-                        M + 240 * S, 528 * S, 52 * S, 34 * S, ID_BURST)
+                        ES_NUMBER | ES_AUTOHSCROLL | WS_TABSTOP,
+                        M + 242 * S, 530 * S, 56 * S, 30 * S, ID_BURST)
     _setfont(UI["burst"], f_norm)
-    button("保存", ID_SAVE, M + 306 * S, 528 * S, 70 * S, 34 * S)
+    button("保存", ID_SAVE, M + 306 * S, 529 * S, 70 * S, 32 * S)
     # 原「目录：APP_DIR」已删除：那是程序安装目录，并非视频库位置，对用户无意义
 
     # ---------------- 右侧：视频库列表 + 缩略预览（与左栏同样落在 y=580） ----------------
     RX = 500 * S
     RW = 436 * S
-    static("视频库", RX, 20 * S, RW, 30 * S, f_big)
-    static("点击预览 · 双击设为壁纸", RX, 54 * S, RW, 18 * S, f_small, muted=True)
+    # 右栏标题下移到标题栏下方，避免与自绘标题栏重叠
+    static("视频库", RX, 84 * S, RW, 30 * S, f_big)
+    static("点击预览 · 双击设为壁纸", RX, 114 * S, RW, 18 * S, f_small, muted=True)
 
     # ListBox：LBS_NOTIFY(1)|LBS_HASSTRINGS(0x40)|LBS_OWNERDRAWFIXED(0x10)
     #          |LBS_NOINTEGRALHEIGHT(0x100)|WS_VSCROLL(0x200000)
     UI["liblist"] = u.CreateWindowExW(
         0, "ListBox", None,
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | 0x00200000 | 0x0001 | 0x0040 | 0x0010 | 0x0100,
-        int(RX), int(84 * S), int(RW), int(280 * S), hwnd, ID_LIBLIST, hinst, None)
+        int(RX), int(140 * S), int(RW), int(236 * S), hwnd, ID_LIBLIST, hinst, None)
     _setfont(UI["liblist"], f_norm)
 
     # 预览区：圆角白底卡片，GDI+ 直接绘 JPG（见 draw_preview）
-    LIB["preview_rect"] = (int(RX), int(376 * S), int(RW), int(152 * S))
-    button("使用此视频", ID_LIBUSE, RX, 540 * S, RW, 40 * S)
+    LIB["preview_rect"] = (int(RX), int(390 * S), int(RW), int(144 * S))
+    button("使用此视频", ID_LIBUSE, RX, 546 * S, RW, 40 * S)
 
     # 填充列表：扫描视频目录，选中当前正在用的那条
     items = scan_library()
