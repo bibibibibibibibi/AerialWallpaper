@@ -17,7 +17,8 @@ u.SendMessageW.restype = ctypes.c_longlong
 BM_CLICK = 0x00F5
 WM_CLOSE = 0x0010
 
-IDS = {"play": 1001, "switch": 1002, "stop": 1003, "start": 1004,
+# 1003 = 智能切换按钮（运行中=停止壁纸，已停止=启动壁纸）
+IDS = {"play": 1001, "stop": 1003, "toggle": 1003,
        "save": 1005, "auto": 1006, "burst": 1007, "always": 1008, "install": 1009}
 WM_SETTEXT = 0x000C
 WM_GETTEXT = 0x000D
@@ -150,23 +151,12 @@ def step_c():
     check("C3 停止后点动一下能启动", ok, str(procs()))
     click("stop")
     wait(lambda: procs()["mpv"] == 0, 10)
-    click("start")
+    click("toggle")     # 智能切换按钮：已停止时点击 = 启动
     ok = wait(lambda: procs()["mpv"] >= 1, 15)
-    check("C4 启动壁纸按钮", ok, str(procs()))
+    check("C4 切换按钮重新启动", ok, str(procs()))
 
 def step_d():
-    print("D. 换视频对话框 + 安装屏保", flush=True)
-    import winreg
-    v0 = cfg().get("video")
-    click("switch")
-    time.sleep(2)
-    dlg = u.FindWindowW("#32770", None)
-    if dlg:
-        u.SendMessageW(dlg, WM_CLOSE, 0, 0)
-    time.sleep(1)
-    check("D1 换视频弹出文件对话框", bool(dlg))
-    check("D2 取消后配置不变", cfg().get("video") == v0)
-    check("D3 面板仍存活", bool(panel()))
+    print("D. 安装屏保", flush=True)
     scr = os.path.join(BASE, "AerialScreensaver.scr")
     old = os.path.getmtime(scr) if os.path.exists(scr) else 0
     click("install")
@@ -183,7 +173,7 @@ def step_e():
         click("always"); time.sleep(2)
     click("stop")
     wait(lambda: procs()["mpv"] == 0, 10)
-    click("start")
+    click("toggle")
     wait(lambda: procs()["mpv"] >= 1, 15)
     time.sleep(8)
     check("E1 重启后仍一直动", status().get("paused") is False and cfg().get("always_play") is True,

@@ -507,13 +507,16 @@ def refresh_ui():
         UI["color"] = AMBER
         txt, sub = "状态：未运行", "点「启动壁纸」开始"
     u.SetWindowTextW(UI["state"], txt)
+    # 智能切换按钮：文字跟随运行状态（每秒刷新，无抖动）
+    if UI.get("toggle"):
+        u.SetWindowTextW(UI["toggle"], "停止壁纸" if running else "启动壁纸")
     fl = UI.get("flash")
     if fl and time.time() < fl[1]:
         sub = fl[0]
     u.SetWindowTextW(UI["sub"], sub)
     v = current_video()
     u.SetWindowTextW(UI["vid"], ("当前视频：" + os.path.basename(v)) if v
-                     else "当前视频：未设置（把 mp4 放进本目录，或点「换视频…」）")
+                     else "当前视频：未设置（双击右侧视频库选择）")
     # 复选框跟随配置（面板改完立刻写盘，所以这里不会抖动）
     if UI.get("always"):
         on = bool(cfg.get("always_play"))
@@ -556,19 +559,18 @@ def ui_wndproc(hwnd, msg, wp, lp):
             else:
                 start_player()
                 flash("播放器未运行，已启动")
-        elif cid == ID_SWITCH and _SWITCH_FN:
-            _SWITCH_FN()
         elif cid == ID_STOP:
-            flash("正在停止…", 2.0)
-            ok = stop_player()
-            flash("已停止，桌面定格为当前视频画面" if ok else "停止未完成，请再点一次", 5.0)
-        elif cid == ID_START:
+            # 智能切换：运行中 -> 停止（桌面定格当前帧）；已停止 -> 启动
             if is_running():
-                flash("壁纸已在运行；想立刻播放请点「立即动一下」", 5.0)
+                flash("正在停止…", 2.0)
+                ok = stop_player()
+                flash("已停止，桌面定格为当前视频画面" if ok else "停止未完成，请再点一次", 5.0)
             else:
                 flash("正在启动…", 2.0)
                 start_player()
                 flash("已启动，画面就绪后接管桌面", 5.0)
+                if UI.get("toggle"):
+                    u.SetWindowTextW(UI["toggle"], "停止壁纸")
         elif cid == ID_SAVE:
             try:
                 v = max(3, min(30, int(_get_edit_text(UI["burst"]) or 8)))
@@ -717,14 +719,15 @@ def run_ui():
     _setfont(UI["vid"], f_small); y += 34 * S
 
     bw = (430 * S - 12 * S) / 2
-    defs = [("立即动一下", ID_PLAY), ("换视频…", ID_SWITCH),
-            ("停止壁纸", ID_STOP), ("启动壁纸", ID_START),
-            ("安装屏保", ID_INSTALL)]
+    # 「停止壁纸」是智能切换按钮：运行中显示"停止壁纸"，已停止显示"启动壁纸"
+    defs = [("立即动一下", ID_PLAY), ("停止壁纸", ID_STOP), ("安装屏保", ID_INSTALL)]
     rows = (len(defs) + 1) // 2
     for i, (txt, cid) in enumerate(defs):
         b = _ctrl(hwnd, "BUTTON", txt, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                   M + (i % 2) * (bw + 12 * S), y + (i // 2) * (34 * S + 6 * S), bw, 32 * S, cid)
         _setfont(b, f_norm)
+        if cid == ID_STOP:
+            UI["toggle"] = b
     y += rows * (34 * S + 6 * S) + 6 * S
 
     UI["auto"] = _ctrl(hwnd, "BUTTON", "开机自动运行",
@@ -808,18 +811,6 @@ def run_ui():
         u.SendMessageW(UI["liblist"], LB_SETCURSEL, sel, 0)
         show_preview(sel)
 
-    # 换视频按钮的真实实现（Win32 打开文件对话框，无第三方依赖）
-    def switch_video_dialog():
-        p = pick_video()
-        if p:
-            cfg = load_cfg(); cfg["video"] = os.path.abspath(p); save_cfg(cfg)
-            if not is_running():
-                start_player()
-            refresh_ui()
-
-    # 把 ID_SWITCH 接到对话框（覆盖 WM_COMMAND 分支里的占位）
-    global _SWITCH_FN
-    _SWITCH_FN = switch_video_dialog
     refresh_ui()
     u.SetTimer(hwnd, 1, 1000, None)
 
@@ -837,57 +828,6 @@ def run_ui():
         u.TranslateMessage(ctypes.byref(msg))
         u.DispatchMessageW(ctypes.byref(msg))
 
-
-def _pick_initial_dir():
-    """换视频对话框的初始目录：当前配置视频所在目录 → 视频库目录 → 程序目录"""
-    try:
-        cur = os.path.abspath(load_cfg().get("video", ""))
-        d = os.path.dirname(cur)
-        if os.path.isdir(d):
-            return d
-    except Exception:
-        pass
-    lib = os.path.join("X:\\", "动态壁纸视频")
-    if os.path.isdir(lib):
-        return lib
-    return APP_DIR
-
-
-def pick_video():
-    """comdlg32 打开文件对话框，返回所选路径或 None"""
-    try:
-        comdlg = ctypes.WinDLL("comdlg32", use_last_error=True)
-
-        class OPENFILENAME(ctypes.Structure):
-            _fields_ = [("lStructSize", wintypes.DWORD), ("hwndOwner", wintypes.HWND),
-                        ("hInstance", wintypes.HINSTANCE), ("lpstrFilter", wintypes.LPCWSTR),
-                        ("lpstrCustomFilter", wintypes.LPWSTR), ("nMaxCustFilter", wintypes.DWORD),
-                        ("nFilterIndex", wintypes.DWORD), ("lpstrFile", wintypes.LPWSTR),
-                        ("nMaxFile", wintypes.DWORD), ("lpstrFileTitle", wintypes.LPWSTR),
-                        ("nMaxFileTitle", wintypes.DWORD), ("lpstrInitialDir", wintypes.LPCWSTR),
-                        ("lpstrTitle", wintypes.LPCWSTR), ("Flags", wintypes.DWORD),
-                        ("nFileOffset", wintypes.WORD), ("nFileExtension", wintypes.WORD),
-                        ("lpstrDefExt", wintypes.LPCWSTR), ("lCustData", ctypes.c_void_p),
-                        ("lpfnHook", ctypes.c_void_p), ("lpTemplateName", wintypes.LPCWSTR)]
-
-        buf = ctypes.create_unicode_buffer(1024)
-        ofn = OPENFILENAME()
-        ofn.lStructSize = ctypes.sizeof(OPENFILENAME)
-        ofn.hwndOwner = UI["hwnd"]
-        ofn.lpstrFilter = "视频 (*.mp4;*.mov;*.webm;*.mkv;*.m4v)\0*.mp4;*.mov;*.webm;*.mkv;*.m4v\0所有文件\0*.*\0"
-        ofn.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
-        ofn.nMaxFile = 1024
-        ofn.lpstrTitle = "选择壁纸视频"
-        ofn.lpstrInitialDir = _pick_initial_dir()
-        ofn.Flags = 0x00001000 | 0x00000800 | 0x00000004   # FILEMUSTEXIST|PATHMUSTEXIST|HIDEREADONLY
-        if comdlg.GetOpenFileNameW(ctypes.byref(ofn)):
-            return buf.value
-    except Exception as e:
-        print("pick_video:", e, file=sys.stderr)
-    return None
-
-
-_SWITCH_FN = None
 
 
 def ensure_console():
