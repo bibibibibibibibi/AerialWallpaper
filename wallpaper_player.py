@@ -32,6 +32,7 @@ import sys
 import json
 import time
 import ctypes
+import itertools
 import shutil
 import subprocess
 import threading
@@ -523,47 +524,44 @@ def ensure_notify_window():
 
 
 # ---------------------------------------------------------------- mpv IPC
+# 架构：一次性连接 RPC（连接 -> 发命令 -> 按 request_id 等回执 -> 关闭）。
+#
+# 为什么不用长连接（两次翻车记录，2026-11-18「面板切换不反应」事故）：
+#   1) 长连接只写不读：mpv 的客户端线程持续往我们这边推事件，写满本端缓冲后
+#      连「读命令」一并卡死 -> 我们的下一条命令 pipe.write 永久阻塞 -> 主循环
+#      整个冻结，面板所有操作没反应、暂停/换片事件全部被吞（事故直接根因）。
+#   2) 长连接加排水线程：Windows 同步句柄同一时间只允许一个未完成 I/O，
+#      排水线程阻塞在 read() 等事件时持住句柄，所有写操作被饿死（16+ 线程堆积）。
+# 一次性连接每条命令独立，两个坑都不存在；ipc_get 多年来一直用这个模式，稳定。
 
-def ipc_connect(timeout=8.0):
+def _ipc_open(retries=3, gap=0.15):
+    """打开一条到 mpv 的 IPC 连接；连不上立即返回 None（mpv 未起 / 已死）"""
     path = "\\\\.\\pipe\\" + PIPE_NAME
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    for _ in range(retries):
         try:
             return open(path, "r+b", buffering=0)
         except OSError:
-            time.sleep(0.2)
+            time.sleep(gap)
     return None
 
 
-def ipc_send(pipe, obj):
-    try:
-        pipe.write((json.dumps(obj) + "\n").encode("utf-8"))
-        return True
-    except Exception:
-        return False
+_RPC_SEQ = itertools.count(1)
 
 
-def ipc_pause(pipe, paused):
-    return ipc_send(pipe, {"command": ["set_property", "pause", bool(paused)]})
+def ipc_rpc(cmd, timeout=1.5):
+    """执行一条 mpv IPC 命令，返回完整回执 dict（含 "error" 字段）；失败返回 None。
 
-
-def ipc_get(prop, timeout=0.8):
-    """另开一条 IPC 连接查询属性。
-
-    主连接只用来下发命令（不读回包，否则事件流会把主循环卡住），
-    查询走独立连接，按 request_id 认出自己的回包就收工。
+    在独立守护线程里跑（写+读都有界），任何情况都不会拖住调用方超过 timeout。
     """
-    try:
-        p = open("\\\\.\\pipe\\" + PIPE_NAME, "r+b", buffering=0)
-    except OSError:
+    p = _ipc_open()
+    if not p:
         return None
+    rid = 900000 + (next(_RPC_SEQ) % 100000)
     out = {}
-    RID = 977
 
     def worker():
         try:
-            p.write((json.dumps({"command": ["get_property", prop],
-                                 "request_id": RID}) + "\n").encode("utf-8"))
+            p.write((json.dumps({"command": cmd, "request_id": rid}) + "\n").encode("utf-8"))
             buf = b""
             t0 = time.time()
             while time.time() - t0 < timeout:
@@ -580,20 +578,36 @@ def ipc_get(prop, timeout=0.8):
                         obj = json.loads(line)
                     except Exception:
                         continue
-                    if obj.get("request_id") == RID:
-                        out["v"] = obj.get("data")
+                    if obj.get("request_id") == rid:
+                        out["r"] = obj
                         return
         except Exception:
             pass
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
-    t.join(timeout + 0.3)
+    t.join(timeout + 0.4)
     try:
         p.close()
     except Exception:
         pass
-    return out.get("v")
+    return out.get("r")
+
+
+def ipc_ok(r):
+    """回执是否表示命令成功送达并执行"""
+    return bool(r) and r.get("error") == "success"
+
+
+def ipc_pause(paused):
+    """暂停/恢复播放。回执确认制：mpv 收不到就返回 False，调用方下轮重试"""
+    return ipc_ok(ipc_rpc(["set_property", "pause", bool(paused)]))
+
+
+def ipc_get(prop, timeout=0.8):
+    """查询属性，返回 data 值或 None"""
+    r = ipc_rpc(["get_property", prop], timeout=timeout)
+    return r.get("data") if r else None
 
 
 # ---------------------------------------------------------------- 单实例
@@ -700,7 +714,7 @@ def main():
     if not hwnd:
         sys.exit("创建壁纸窗口失败（找不到 Progman？）")
 
-    proc = hproc = pipe = None
+    proc = hproc = None
     paused = None
     stray_until = 0.0
     play_pos = 0.0          # 上次已知的播放位置（秒）
@@ -726,9 +740,9 @@ def main():
         """用 mpv 截当前帧做下次启动的海报（已存在则跳过）"""
         nonlocal poster
         poster = poster_path(video)
-        if os.path.exists(poster) or not pipe:
+        if os.path.exists(poster):
             return
-        if ipc_send(pipe, {"command": ["screenshot-to-file", poster, "video"]}):
+        if ipc_ok(ipc_rpc(["screenshot-to-file", poster, "video"], timeout=3.0)):
             log("poster saved: " + poster)
 
     def shutdown(reason="panel", keep_frame=True):
@@ -739,12 +753,12 @@ def main():
         """
         log("shutdown requested by " + reason)
         # 先冻结再截一帧，保证截到的是"定格那一帧"而不是运动中带拖影的画面
-        if pipe:
-            ipc_pause(pipe, True)
+        alive = ipc_pause(True)
+        if alive:
             time.sleep(0.25)
         still = os.path.splitext(video)[0] + ".stopframe.jpg"
-        if keep_frame and pipe:
-            if ipc_send(pipe, {"command": ["screenshot-to-file", still, "video"]}):
+        if keep_frame and alive:
+            if ipc_ok(ipc_rpc(["screenshot-to-file", still, "video"], timeout=3.0)):
                 # mpv 编码 4K 帧可能要 1-2 秒：轮询等文件写完再往下走，
                 # 固定睡 0.6 秒会在慢的时候拿不到文件、桌面退回首帧海报（画面跳变）
                 prev_size, stable, t0 = -1, 0, time.time()
@@ -761,11 +775,6 @@ def main():
                         stable = 0
                     prev_size = sz
                     time.sleep(0.15)
-        try:
-            if pipe:
-                pipe.close()
-        except Exception:
-            pass
         try:
             if proc:
                 proc.terminate()
@@ -831,7 +840,7 @@ def main():
         return True
 
     def restart(delay=0.0):
-        nonlocal pipe, paused
+        nonlocal paused
         if delay:
             time.sleep(delay)
         # 宿主窗口没了就绝不能用它去起 mpv（会变成独立播放窗），交给 rebuild
@@ -853,12 +862,6 @@ def main():
             proc.wait(timeout=1)
         except Exception:
             pass
-        try:
-            if pipe:
-                pipe.close()
-        except Exception:
-            pass
-        pipe = None
         paused = None
         return launch()
 
@@ -866,17 +869,14 @@ def main():
         """就地换片：让现有 mpv 直接 loadfile，进程和渲染窗口都不重建。
 
         这是"换片时冒出播放窗口"的根治办法——不新建进程就不会有新的顶层窗口。
+        loadfile 有回执确认：换片失败立即知道，不会静默丢失。
         """
-        nonlocal pipe
-        if pipe is None:
-            pipe = ipc_connect(timeout=3)
-        if not pipe:
+        r = ipc_rpc(["loadfile", newv, "replace"], timeout=3.0)
+        if not ipc_ok(r):
             return False
-        if not ipc_send(pipe, {"command": ["loadfile", newv, "replace"]}):
-            return False
-        ipc_send(pipe, {"command": ["set_property", "loop-file", "inf"]})
+        ipc_rpc(["set_property", "loop-file", "inf"])
         if paused:
-            ipc_pause(pipe, True)
+            ipc_pause(True)
         return True
 
     def rebuild_host():
@@ -885,7 +885,7 @@ def main():
         锁屏解锁后 Windows 会换掉桌面 WorkerW，宿主窗口被连带销毁；此时 mpv 若还活着
         就会变成屏幕上的独立播放窗，所以第一条命令永远是先把 mpv 收掉。
         """
-        nonlocal hwnd, proc, hproc, pipe, paused
+        nonlocal hwnd, proc, hproc, paused
         if hproc:
             try:
                 k32.CloseHandle(hproc)
@@ -901,12 +901,6 @@ def main():
             except Exception:
                 pass
             proc = None
-        try:
-            if pipe:
-                pipe.close()
-        except Exception:
-            pass
-        pipe = None
         paused = None
         # 收掉画面后桌面露出的是系统静态壁纸，先保证它是"当前视频的定格帧"。
         # 已经是同一张就不再重复设置——SystemParametersInfo 要写注册表并广播，
@@ -923,14 +917,12 @@ def main():
         hwnd = newh
         if not launch():
             return False
-        pipe = ipc_connect(timeout=3)
         reveal(timeout=2.0)
         capture_poster()
         trigger_burst(BURST, "host-rebuilt")
         return True
 
     launch()
-    pipe = ipc_connect()
     reveal()
     capture_poster()
     trigger_burst(BURST, "start")
@@ -959,7 +951,13 @@ def main():
 
     write_status("start")
 
+    last_iter = time.time()
     while True:
+        # 看门狗：单次迭代超过 5 秒 = 主循环曾被什么东西卡住，留痕便于诊断
+        _t0 = time.time()
+        if _t0 - last_iter > 5.0:
+            log(f"slow loop iteration: {_t0 - last_iter:.1f}s")
+        last_iter = _t0
         # 等待：mpv 进程退出 / 面板「停止」/ 面板「立即动一下」/ 屏保退出 / 消息
         items = []
         if hproc:
@@ -1034,7 +1032,6 @@ def main():
 
         if fired == "proc" or (proc and proc.poll() is not None):
             if restart(1.0):
-                pipe = ipc_connect()
                 reveal()
                 capture_poster()
                 trigger_burst(BURST, "mpv-restart")
@@ -1050,9 +1047,8 @@ def main():
         #   · 否则：普通模式播满 burst 秒定格；「一直动」模式忽略到期
         want_paused = bool(STATE["blockers"]) or (not ALWAYS_PLAY and now >= STATE["burst_until"])
         if want_paused != paused:
-            if pipe is None:
-                pipe = ipc_connect(timeout=2)
-            if pipe and ipc_pause(pipe, want_paused):
+            # ipc_pause 是回执确认制：mpv 没起/没收到就返回 False，下轮迭代自动重试
+            if ipc_pause(want_paused):
                 paused = want_paused
                 write_status("state")
                 log("paused" if want_paused else "playing")
@@ -1069,7 +1065,7 @@ def main():
                         pos_video = video
 
         # 播放中低频采样，覆盖"正在播的时候锁屏"的边角情况
-        if not want_paused and pipe and now >= next_pos_poll:
+        if not want_paused and now >= next_pos_poll:
             next_pos_poll = now + 3.0
             v = ipc_get("time-pos", timeout=0.4)
             if isinstance(v, (int, float)):
@@ -1113,7 +1109,6 @@ def main():
                                     pending_poster = True
                             else:
                                 if restart():
-                                    pipe = ipc_connect()
                                     reveal()
                                     capture_poster()
                                 print(f"switched (restart) -> {video}", flush=True)
