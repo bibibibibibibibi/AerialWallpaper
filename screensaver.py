@@ -75,13 +75,14 @@ def launch_mpv(hwnd, video, cfg):
     if not mpv:
         raise SystemExit("找不到 mpv.exe")
     return subprocess.Popen(
-        [mpv, f"--wid={hwnd}", "--loop=inf", "--no-audio", "--really-quiet",
+        [mpv, "--no-config", "--load-scripts=no", f"--wid={hwnd}",
+         "--vo=gpu-next,gpu,direct3d", "--loop=inf", "--no-audio", "--really-quiet",
          "--no-stop-screensaver",
          "--no-osd-bar", "--osd-level=0", "--hwdec=auto-safe",
          "--keepaspect=yes", "--panscan=0.0",
          "--no-input-default-bindings", "--no-osc", "--border=no",
-         video],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+         "--", video],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
@@ -91,7 +92,7 @@ u = ctypes.WinDLL("user32", use_last_error=True)
 k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 H = wintypes.HWND
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, H, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, H, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 
 
 class WNDCLASS(ctypes.Structure):
@@ -102,7 +103,7 @@ class WNDCLASS(ctypes.Structure):
                 ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
 
 
-u.DefWindowProcW.restype = ctypes.c_long
+u.DefWindowProcW.restype = ctypes.c_ssize_t
 u.DefWindowProcW.argtypes = [H, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 u.CreateWindowExW.restype = H
 u.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
@@ -117,6 +118,11 @@ u.GetSystemMetrics.restype = ctypes.c_int
 u.GetSystemMetrics.argtypes = [ctypes.c_int]
 u.GetMessageW.restype = wintypes.BOOL
 u.GetMessageW.argtypes = [ctypes.c_void_p, H, wintypes.UINT, wintypes.UINT]
+u.IsWindow.argtypes = [H]
+u.IsWindow.restype = wintypes.BOOL
+u.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+u.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+u.DispatchMessageW.restype = ctypes.c_ssize_t
 u.PostQuitMessage.argtypes = [ctypes.c_int]
 u.DestroyWindow.argtypes = [H]
 u.SetCursor.restype = ctypes.c_void_p
@@ -266,20 +272,9 @@ def show_config():
 # ---------------------------------------------------------------- 安装 / 卸载
 
 def install_screensaver():
-    """把当前 exe 复制为 .scr 并设为当前屏保（HKCU，不写 System32 以免权限问题）"""
-    import shutil
-    import winreg
-    src = sys.executable if FROZEN else os.path.join(APP_DIR, "AerialWallpaper.exe")
-    if not os.path.exists(src):
-        return False, "找不到 exe"
-    dst = os.path.join(APP_DIR, SCR_SAVE_AS)
-    shutil.copyfile(src, dst)
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\Desktop", 0,
-                        winreg.KEY_SET_VALUE) as k:
-        winreg.SetValueEx(k, "SCRNSAVE.EXE", 0, winreg.REG_SZ, dst)
-        winreg.SetValueEx(k, "ScreenSaveActive", 0, winreg.REG_SZ, "1")
-        winreg.SetValueEx(k, "ScreenSaveTimeOut", 0, winreg.REG_SZ, "600")
-    return True, dst
+    """Install a real Windows .scr for both the source and packaged app."""
+    from screensaver_install import install_screensaver as install
+    return install(APP_DIR, sys.executable if FROZEN else None)
 
 
 def uninstall_screensaver():
@@ -308,7 +303,16 @@ def screensaver_installed():
 
 
 def main():
-    args = sys.argv[1:]
+    # Windows also supplies /p:HWND and /c:HWND, not only separated flags.
+    args = []
+    for arg in sys.argv[1:]:
+        flag, separator, value = arg.partition(":")
+        if separator and flag.lower() in ("/p", "-p", "/c", "-c"):
+            args.append(flag)
+            if value:
+                args.append(value)
+        else:
+            args.append(arg)
     low = [a.lower() for a in args]
 
     if any(a in low for a in ("/p", "-p")):

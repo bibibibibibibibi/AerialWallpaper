@@ -2,7 +2,11 @@
 aerial_catalog.json
 size_cache.json
 status.json
+config.json
+config.json.lock
 player.log
+player-startup.log
+mpv.log
 app_error.log
 ui_err.txt
 ui_out.txt

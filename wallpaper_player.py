@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import threading
 from ctypes import wintypes
+from preferences import update_config
 
 if getattr(sys, "frozen", False):
     # 打包成 exe 后，配置/日志/mpv/视频都以 exe 所在目录为准
@@ -110,6 +111,25 @@ def find_mpv(cfg):
     return shutil.which("mpv") or ""
 
 
+def mpv_command(mpv, video, hwnd, start_options=()):
+    """Use only video outputs that can actually embed in our desktop HWND.
+
+    mpv's automatic fallback includes SDL. SDL ignores --wid and opens its own
+    window, which the stray-window guard must hide; IPC still works, so this
+    otherwise looks like successful playback of an invisible wallpaper.
+    """
+    return [
+        mpv, "--no-config", "--load-scripts=no", f"--wid={hwnd}",
+        *start_options, "--vo=gpu-next,gpu,direct3d",
+        "--log-file=" + os.path.join(HERE, "mpv.log"),
+        "--loop=inf", "--no-audio", "--really-quiet", "--no-stop-screensaver",
+        "--no-osd-bar", "--osd-level=0", "--hwdec=auto-safe",
+        "--video-unscaled=no", "--keepaspect=yes", "--panscan=0.0",
+        "--no-input-default-bindings", "--no-osc", "--border=no",
+        f"--input-ipc-server={PIPE_NAME}", "--keep-open=yes", "--", video,
+    ]
+
+
 # ---------------------------------------------------------------- Win32
 
 u = ctypes.WinDLL("user32", use_last_error=True)
@@ -131,10 +151,14 @@ u.FindWindowW.restype = H
 u.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
 u.FindWindowExW.restype = H
 u.FindWindowExW.argtypes = [H, H, wintypes.LPCWSTR, wintypes.LPCWSTR]
-u.DefWindowProcW.restype = ctypes.c_long
+u.DefWindowProcW.restype = ctypes.c_ssize_t
 u.DefWindowProcW.argtypes = [H, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 u.SetParent.restype = H
 u.SetParent.argtypes = [H, H]
+u.GetParent.restype = H
+u.GetParent.argtypes = [H]
+u.DestroyWindow.argtypes = [H]
+u.DestroyWindow.restype = wintypes.BOOL
 u.SetWindowPos.argtypes = [H, H, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
 u.ShowWindow.argtypes = [H, ctypes.c_int]
 u.GetWindowLongW.restype = ctypes.c_long
@@ -150,6 +174,13 @@ u.IsWindowVisible.argtypes = [H]
 u.IsWindowVisible.restype = wintypes.BOOL
 u.GetWindowThreadProcessId.argtypes = [H, ctypes.POINTER(wintypes.DWORD)]
 u.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
+u.EnumChildWindows.argtypes = [H, ctypes.c_void_p, wintypes.LPARAM]
+u.GetClassNameW.argtypes = [H, wintypes.LPWSTR, ctypes.c_int]
+u.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), H, wintypes.UINT, wintypes.UINT, wintypes.UINT]
+u.PeekMessageW.restype = wintypes.BOOL
+u.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+u.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+u.DispatchMessageW.restype = ctypes.c_ssize_t
 u.MsgWaitForMultipleObjects.restype = wintypes.DWORD
 u.MsgWaitForMultipleObjects.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE),
                                         wintypes.BOOL, wintypes.DWORD, wintypes.DWORD]
@@ -213,7 +244,7 @@ def log(msg):
     except Exception:
         pass
 
-WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, H, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, H, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
 
 
 class WNDCLASS(ctypes.Structure):
@@ -421,10 +452,19 @@ def make_wallpaper_window(show=True):
                              0, 0, w, h, None, None, hinst, None)
     if not hwnd:
         return None
-    u.SetParent(hwnd, layer)
+    # SetParent does not change WS_POPUP/WS_CHILD for us. Set the style first,
+    # and verify the actual parent: NULL can mean a successful previous parent.
     style = u.GetWindowLongW(hwnd, GWL_STYLE)
     u.SetWindowLongW(hwnd, GWL_STYLE,
                      (style & ~WS_POPUP) | WS_CHILD | WS_CLIPSIBLINGS)
+    ctypes.set_last_error(0)
+    u.SetParent(hwnd, layer)
+    parent_error = ctypes.get_last_error()
+    actual_parent = u.GetParent(hwnd)
+    if actual_parent != layer:
+        log(f"SetParent failed: expected={layer} actual={actual_parent} error={parent_error}")
+        u.DestroyWindow(hwnd)
+        return None
     if show:
         u.SetWindowPos(hwnd, None, 0, 0, w, h,
                        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED)
@@ -477,21 +517,34 @@ def get_static_wallpaper():
     return ""
 
 
-def wait_mpv_ready(hwnd, timeout=2.5, settle=0.25):
-    """等 mpv 在宿主窗口内建好渲染子窗口（说明首帧即将/已经呈现）"""
+def wait_mpv_ready(hwnd, timeout=8.0, settle=0.25, process=None):
+    """Wait for this mpv's embedded HWND, not merely a working IPC pipe.
+
+    Keep servicing the host's messages during cross-process window creation.
+    A running standalone/SDL renderer must never count as a ready wallpaper.
+    """
     kids = []
 
     def cb(child, lp):
+        if process is not None:
+            pid = wintypes.DWORD()
+            u.GetWindowThreadProcessId(child, ctypes.byref(pid))
+            if pid.value != process.pid:
+                return True
         kids.append(child)
         return True
 
-    proc = u.EnumChildWindows
-    proc.argtypes = [H, ctypes.c_void_p, wintypes.LPARAM]
     cb_ref = ctypes.WINFUNCTYPE(wintypes.BOOL, H, wintypes.LPARAM)(cb)
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    deadline = time.monotonic() + timeout
+    msg = wintypes.MSG()
+    while time.monotonic() < deadline:
+        while u.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+            u.TranslateMessage(ctypes.byref(msg))
+            u.DispatchMessageW(ctypes.byref(msg))
+        if process is not None and process.poll() is not None:
+            return False
         kids.clear()
-        proc(hwnd, ctypes.cast(cb_ref, ctypes.c_void_p), 0)
+        u.EnumChildWindows(hwnd, ctypes.cast(cb_ref, ctypes.c_void_p), 0)
         if kids:
             time.sleep(settle)
             return True
@@ -700,10 +753,11 @@ def main():
         orig = get_static_wallpaper()
         if orig and not orig.endswith(".poster.jpg"):
             try:
-                cfg["original_wallpaper"] = orig
-                with open(CONFIG, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, ensure_ascii=False, indent=2)
-                log("original wallpaper remembered: " + orig)
+                # Share the panel's read/merge/write lock, never overwrite its
+                # newer preferences with the snapshot read during startup.
+                saved = update_config(CONFIG, {"original_wallpaper": orig}, missing_only=True)
+                cfg["original_wallpaper"] = saved["original_wallpaper"]
+                log("original wallpaper remembered: " + cfg["original_wallpaper"])
             except Exception:
                 pass
     poster = poster_path(video)
@@ -730,10 +784,16 @@ def main():
         if h:
             k32.ResetEvent(h)
 
-    def reveal(timeout=2.5):
-        """mpv 渲染就绪后再显示壁纸窗口，避免露黑场"""
-        if not wait_mpv_ready(hwnd, timeout=timeout):
-            log("mpv 就绪等待超时，直接显示")
+    def reveal(timeout=8.0):
+        """Only report playback after mpv really attached to the desktop host."""
+        if not wait_mpv_ready(hwnd, timeout=timeout, process=proc):
+            message = "mpv 未能嵌入桌面窗口，请查看 mpv.log"
+            log(message)
+            if proc and proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=3)
+            hide_wallpaper_window(hwnd)
+            raise RuntimeError(message)
         show_wallpaper_window(hwnd)
 
     def capture_poster():
@@ -821,14 +881,8 @@ def main():
             start_opt.append(f"--start={play_pos:.3f}")
             log(f"resume at {play_pos:.2f}s")
         proc = subprocess.Popen(
-            [mpv, f"--wid={hwnd}", *start_opt, "--loop=inf", "--no-audio", "--really-quiet",
-             "--no-stop-screensaver",
-             "--no-osd-bar", "--osd-level=0", "--hwdec=auto-safe",
-             "--video-unscaled=no", "--keepaspect=yes", "--panscan=0.0",
-             "--no-input-default-bindings", "--no-osc", "--border=no",
-             f"--input-ipc-server={PIPE_NAME}",
-             "--keep-open=yes", video],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            mpv_command(mpv, video, hwnd, start_opt),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         hproc = k32.OpenProcess(PROCESS_SYNCHRONIZE, False, proc.pid)
         log(f"mpv pid={proc.pid} screensaver-inhibit=off (--no-stop-screensaver)")
         hs = k32.OpenProcess(PROCESS_SET_INFORMATION, False, proc.pid)
@@ -917,7 +971,7 @@ def main():
         hwnd = newh
         if not launch():
             return False
-        reveal(timeout=2.0)
+        reveal()
         capture_poster()
         trigger_burst(BURST, "host-rebuilt")
         return True
@@ -929,7 +983,8 @@ def main():
     print(f"host={hwnd} mpv={proc.pid} video={video} burst={BURST:g}s", flush=True)
 
     cli_override = "--video" in sys.argv
-    cfg_mtime = os.path.getmtime(CONFIG) if os.path.exists(CONFIG) else 0
+    # Always reconcile once: preferences may change while mpv is initializing.
+    cfg_mtime = None
     last_nudge = (load_config().get("nudge") or 0)
     msg = wintypes.MSG()
     next_cfg = time.time() + 1
@@ -1118,4 +1173,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # pythonw has no console: retain the real failure instead of vanishing.
+        import traceback
+        log(traceback.format_exc())
+        raise
